@@ -1,7 +1,7 @@
 package com.nordencapital.spine.user;
 
 import java.time.Clock;
-import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 
@@ -11,14 +11,25 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.nordencapital.spine.auth.AuthTokenService;
+import com.nordencapital.spine.auth.AuthUser;
 import com.nordencapital.spine.auth.TokenPurpose;
 import com.nordencapital.spine.auth.UserSessions;
 import com.nordencapital.spine.common.ApiException;
 import com.nordencapital.spine.common.Emails;
 import com.nordencapital.spine.mail.AuthMails;
+import com.nordencapital.spine.me.SignInDay;
+import com.nordencapital.spine.me.SignInHistory;
 
 /**
- * User management for admins: list, invite, resend invite, change role or status.
+ * User management for the OWNER and ADMINs. Who can see and manage whom:
+ * {@link UserAccess}.
+ * <ul>
+ * <li>A user the caller cannot see is "not found" (404), so its existence is not
+ * shown.</li>
+ * <li>A user the caller can see but not manage gives 403 {@code forbidden}.</li>
+ * </ul>
+ * The caller is loaded again from the database on every call (not trusted from the
+ * session).
  */
 @Service
 public class UserAdminService {
@@ -31,27 +42,64 @@ public class UserAdminService {
 
 	private final UserSessions sessions;
 
+	private final SignInHistory signInHistory;
+
 	private final Clock clock;
 
 	public UserAdminService(UserRepository users, AuthTokenService tokens, AuthMails mails, UserSessions sessions,
-			Clock clock) {
+			SignInHistory signInHistory, Clock clock) {
 		this.users = users;
 		this.tokens = tokens;
 		this.mails = mails;
 		this.sessions = sessions;
+		this.signInHistory = signInHistory;
 		this.clock = clock;
 	}
 
+	/**
+	 * Users the caller can see, oldest first.
+	 */
 	@Transactional(readOnly = true)
-	public List<UserResponse> list() {
-		return this.users.findAllByOrderByCreatedAtAsc().stream().map(UserResponse::from).toList();
+	public List<UserResponse> list(AuthUser principal) {
+		User actor = actor(principal);
+		return this.users.findAllByOrderByCreatedAtAsc()
+			.stream()
+			.filter((user) -> UserAccess.canSee(actor, user))
+			.map((user) -> UserResponse.from(user, UserAccess.canManage(actor, user)))
+			.toList();
 	}
 
 	/**
-	 * @throws ApiException 409 {@code email_taken}
+	 * @throws ApiException 404 {@code user_not_found}
+	 */
+	@Transactional(readOnly = true)
+	public UserResponse get(AuthUser principal, UUID id) {
+		User actor = actor(principal);
+		User user = visible(actor, id);
+		return UserResponse.from(user, UserAccess.canManage(actor, user));
+	}
+
+	/**
+	 * Login attempts per day of a user the caller can see, in the caller's time zone.
+	 * @throws ApiException 404 {@code user_not_found}
+	 */
+	@Transactional(readOnly = true)
+	public List<SignInDay> signIns(AuthUser principal, UUID id, LocalDate from) {
+		User actor = actor(principal);
+		User user = visible(actor, id);
+		return this.signInHistory.days(user.getId(), actor.getId(), from);
+	}
+
+	/**
+	 * @throws ApiException 403 {@code forbidden} (role not allowed), 409
+	 * {@code email_taken}
 	 */
 	@Transactional
-	public UserResponse invite(String email, Role role) {
+	public UserResponse invite(AuthUser principal, String email, Role role) {
+		User actor = actor(principal);
+		if (!UserAccess.canInvite(actor, role)) {
+			throw forbidden("You cannot invite a user with this role");
+		}
 		String normalized = Emails.normalize(email);
 		if (this.users.existsByEmail(normalized)) {
 			throw emailTaken();
@@ -64,16 +112,16 @@ public class UserAdminService {
 			throw emailTaken();
 		}
 		this.mails.sendInvite(user.getEmail(), this.tokens.issue(user, TokenPurpose.INVITE));
-		return UserResponse.from(user);
+		return UserResponse.from(user, UserAccess.canManage(actor, user));
 	}
 
 	/**
 	 * Sends a new invite link (the old one stops working).
-	 * @throws ApiException 404 {@code user_not_found}, 409 {@code not_invited}
+	 * @throws ApiException 404, 403, 409 {@code not_invited}
 	 */
 	@Transactional
-	public void resendInvite(UUID id) {
-		User user = find(id);
+	public void resendInvite(AuthUser principal, UUID id) {
+		User user = manageable(actor(principal), id);
 		if (user.getStatus() != UserStatus.INVITED) {
 			throw new ApiException(HttpStatus.CONFLICT, "not_invited", "Only INVITED users can get a new invite");
 		}
@@ -81,69 +129,86 @@ public class UserAdminService {
 	}
 
 	/**
-	 * Changes role and/or status.
-	 * <ul>
-	 * <li>status DISABLED: the user is logged out everywhere and their links stop
-	 * working;</li>
-	 * <li>status ACTIVE on a DISABLED user: back to ACTIVE (or INVITED if they never set
-	 * a password); on an INVITED user it changes nothing;</li>
-	 * <li>a role change logs the user out everywhere.</li>
-	 * </ul>
-	 * @throws ApiException 404 {@code user_not_found}, 400 {@code validation_error}, 409
-	 * {@code cannot_disable_self}, 409 {@code last_admin}
+	 * Disables the user: logs them out everywhere and their links stop working. Already
+	 * disabled: no change.
+	 * @throws ApiException 404, 403
 	 */
 	@Transactional
-	public UserResponse update(UUID id, Role role, UserStatus status, UUID actorId) {
-		if (status == UserStatus.INVITED) {
-			throw new ApiException(HttpStatus.BAD_REQUEST, "validation_error", "status: must be ACTIVE or DISABLED");
-		}
-		User user = find(id);
-		if (status == UserStatus.DISABLED && user.getId().equals(actorId)) {
-			throw new ApiException(HttpStatus.CONFLICT, "cannot_disable_self", "You cannot disable yourself");
-		}
-		Role newRole = (role != null) ? role : user.getRole();
-		UserStatus newStatus = newStatus(user, status);
-
-		boolean staysActiveAdmin = newRole == Role.ADMIN && newStatus == UserStatus.ACTIVE;
-		if (user.isActiveAdmin() && !staysActiveAdmin) {
-			// Locks the active admin rows, so two admins cannot demote each other at once.
-			if (this.users.findAllByRoleAndStatus(Role.ADMIN, UserStatus.ACTIVE).size() <= 1) {
-				throw new ApiException(HttpStatus.CONFLICT, "last_admin",
-						"There must always be at least one active admin");
-			}
-		}
-
-		boolean roleChanged = newRole != user.getRole();
-		boolean disabled = newStatus == UserStatus.DISABLED && user.getStatus() != UserStatus.DISABLED;
-		Instant now = this.clock.instant();
-		user.setRole(newRole, now);
-		user.setStatus(newStatus, now);
-		if (disabled) {
+	public UserResponse disable(AuthUser principal, UUID id) {
+		User actor = actor(principal);
+		User user = manageable(actor, id);
+		if (user.getStatus() != UserStatus.DISABLED) {
+			user.setStatus(UserStatus.DISABLED, this.clock.instant());
 			this.tokens.deleteAll(user);
-		}
-		if (roleChanged || disabled) {
 			this.sessions.invalidateAll(user.getId());
 		}
-		return UserResponse.from(user);
+		return UserResponse.from(user, true);
 	}
 
-	private static UserStatus newStatus(User user, UserStatus requested) {
-		if (requested == null) {
-			return user.getStatus();
-		}
-		if (requested == UserStatus.DISABLED) {
-			return UserStatus.DISABLED;
-		}
-		// requested ACTIVE
+	/**
+	 * Enables a disabled user: ACTIVE again, or INVITED if they never set a password.
+	 * Other statuses: no change.
+	 * @throws ApiException 404, 403
+	 */
+	@Transactional
+	public UserResponse enable(AuthUser principal, UUID id) {
+		User user = manageable(actor(principal), id);
 		if (user.getStatus() == UserStatus.DISABLED) {
-			return (user.getPasswordHash() != null) ? UserStatus.ACTIVE : UserStatus.INVITED;
+			UserStatus status = (user.getPasswordHash() != null) ? UserStatus.ACTIVE : UserStatus.INVITED;
+			user.setStatus(status, this.clock.instant());
 		}
-		return user.getStatus();
+		return UserResponse.from(user, true);
 	}
 
-	private User find(UUID id) {
+	/**
+	 * Logs the user out everywhere.
+	 * @throws ApiException 404, 403
+	 */
+	@Transactional
+	public void logoutAll(AuthUser principal, UUID id) {
+		User user = manageable(actor(principal), id);
+		this.sessions.invalidateAll(user.getId());
+	}
+
+	/**
+	 * Emails the user a reset-password link (1 hour). Only for ACTIVE users.
+	 * @throws ApiException 404, 403, 409 {@code not_active}
+	 */
+	@Transactional
+	public void sendPasswordReset(AuthUser principal, UUID id) {
+		User user = manageable(actor(principal), id);
+		if (user.getStatus() != UserStatus.ACTIVE) {
+			throw new ApiException(HttpStatus.CONFLICT, "not_active", "Only ACTIVE users can get a reset link");
+		}
+		this.mails.sendPasswordReset(user.getEmail(), this.tokens.issue(user, TokenPurpose.RESET));
+	}
+
+	/**
+	 * The caller, loaded again. Only an ACTIVE OWNER or ADMIN may use this service.
+	 */
+	private User actor(AuthUser principal) {
+		return this.users.findById(principal.id())
+			.filter((user) -> user.getStatus() == UserStatus.ACTIVE)
+			.filter((user) -> user.getRole() == Role.OWNER || user.getRole() == Role.ADMIN)
+			.orElseThrow(() -> forbidden("You cannot do this"));
+	}
+
+	private User visible(User actor, UUID id) {
 		return this.users.findById(id)
+			.filter((user) -> UserAccess.canSee(actor, user))
 			.orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "user_not_found", "User not found"));
+	}
+
+	private User manageable(User actor, UUID id) {
+		User user = visible(actor, id);
+		if (!UserAccess.canManage(actor, user)) {
+			throw forbidden("You cannot manage this user");
+		}
+		return user;
+	}
+
+	private static ApiException forbidden(String message) {
+		return new ApiException(HttpStatus.FORBIDDEN, "forbidden", message);
 	}
 
 	private static ApiException emailTaken() {

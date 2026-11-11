@@ -1,5 +1,6 @@
 package com.nordencapital.spine.auth;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
@@ -22,6 +23,7 @@ import com.nordencapital.spine.config.SecurityConfig;
 import com.nordencapital.spine.ping.PingController;
 import com.nordencapital.spine.user.AdminUserController;
 import com.nordencapital.spine.user.Role;
+import com.nordencapital.spine.user.User;
 import com.nordencapital.spine.user.UserAdminService;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -80,9 +82,10 @@ class SecurityRulesWebTests {
 	}
 
 	@Test
-	void adminCanUseAdminApi() {
-		given(this.userAdminService.list()).willReturn(List.of());
+	void adminAndOwnerCanUseAdminApi() {
+		given(this.userAdminService.list(any())).willReturn(List.of());
 		assertThat(this.mvc.get().uri("/api/admin/users").with(as(Role.ADMIN))).hasStatus(HttpStatus.OK);
+		assertThat(this.mvc.get().uri("/api/admin/users").with(as(Role.OWNER))).hasStatus(HttpStatus.OK);
 	}
 
 	@Test
@@ -134,7 +137,8 @@ class SecurityRulesWebTests {
 
 	@Test
 	void loginWithCsrfReturnsUserAndNewCsrfCookie() {
-		AuthUser user = new AuthUser(UUID.randomUUID(), "a@example.com", Role.EMPLOYEE);
+		User user = User.invite("a@example.com", Role.EMPLOYEE, Instant.now());
+		user.setNames("Ada", null, Instant.now());
 		given(this.authService.login(eq("a@example.com"), eq("correct-password"), anyString())).willReturn(user);
 		String csrf = csrfToken();
 		MvcTestResult result = this.mvc.post()
@@ -147,7 +151,9 @@ class SecurityRulesWebTests {
 		assertThat(result).hasStatus(HttpStatus.OK);
 		assertThat(result).bodyJson().extractingPath("$.email").isEqualTo("a@example.com");
 		assertThat(result).bodyJson().extractingPath("$.role").isEqualTo("EMPLOYEE");
-		assertThat(result).bodyJson().extractingPath("$.id").isEqualTo(user.id().toString());
+		assertThat(result).bodyJson().extractingPath("$.id").isEqualTo(user.getId().toString());
+		assertThat(result).bodyJson().extractingPath("$.firstName").isEqualTo("Ada");
+		assertThat(result).bodyJson().extractingPath("$.lastName").isNull();
 		Cookie newCsrf = result.getResponse().getCookie("XSRF-TOKEN");
 		assertThat(newCsrf).isNotNull();
 		assertThat(newCsrf.getValue()).isNotEqualTo(csrf);
@@ -195,19 +201,28 @@ class SecurityRulesWebTests {
 	}
 
 	@Test
-	void adminPatchPassesActorId() {
+	void adminActionPassesCaller() {
 		AuthUser admin = new AuthUser(UUID.randomUUID(), "admin@example.com", Role.ADMIN);
 		UUID target = UUID.randomUUID();
 		String csrf = csrfToken();
-		assertThat(this.mvc.patch()
-			.uri("/api/admin/users/" + target)
+		assertThat(this.mvc.post()
+			.uri("/api/admin/users/" + target + "/disable")
 			.with(as(admin))
+			.cookie(new Cookie("XSRF-TOKEN", csrf))
+			.header("X-XSRF-TOKEN", csrf)).hasStatus(HttpStatus.OK);
+		verify(this.userAdminService).disable(eq(admin), eq(target));
+	}
+
+	@Test
+	void roleChangeEndpointIsGone() {
+		String csrf = csrfToken();
+		assertThat(this.mvc.patch()
+			.uri("/api/admin/users/" + UUID.randomUUID())
+			.with(as(Role.OWNER))
 			.cookie(new Cookie("XSRF-TOKEN", csrf))
 			.header("X-XSRF-TOKEN", csrf)
 			.contentType(MediaType.APPLICATION_JSON)
-			.content("{\"status\":\"DISABLED\"}")).hasStatus(HttpStatus.OK);
-		verify(this.userAdminService).update(eq(target), any(), eq(com.nordencapital.spine.user.UserStatus.DISABLED),
-				eq(admin.id()));
+			.content("{\"role\":\"ADMIN\"}")).hasStatus(HttpStatus.METHOD_NOT_ALLOWED);
 	}
 
 	private MvcTestResult postWithCsrf(String uri, String json) {

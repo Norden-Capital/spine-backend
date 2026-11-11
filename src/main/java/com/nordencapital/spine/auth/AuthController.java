@@ -37,6 +37,7 @@ import org.springframework.web.bind.annotation.RestController;
 import com.nordencapital.spine.common.ApiError;
 import com.nordencapital.spine.common.ApiException;
 import com.nordencapital.spine.user.Role;
+import com.nordencapital.spine.user.User;
 
 @Tag(name = "Auth", description = "Login, logout, current user, forgot and set password. "
 		+ "Every POST needs the X-XSRF-TOKEN header (value of the XSRF-TOKEN cookie, from GET /api/auth/csrf).")
@@ -78,7 +79,8 @@ public class AuthController {
 	@PostMapping("/login")
 	public MeResponse login(@Valid @RequestBody LoginRequest body, HttpServletRequest request,
 			HttpServletResponse response) {
-		AuthUser user = this.authService.login(body.email(), body.password(), request.getRemoteAddr());
+		User loggedIn = this.authService.login(body.email(), body.password(), request.getRemoteAddr());
+		AuthUser user = new AuthUser(loggedIn.getId(), loggedIn.getEmail(), loggedIn.getRole());
 
 		// New session id on login (stops session fixation).
 		if (request.getSession(false) != null) {
@@ -92,7 +94,7 @@ public class AuthController {
 
 		// New CSRF token after login.
 		this.csrfTokenRepository.saveToken(this.csrfTokenRepository.generateToken(request), request, response);
-		return MeResponse.from(user);
+		return MeResponse.from(loggedIn);
 	}
 
 	@Operation(summary = "Log out", description = "Deletes the session. Works even if not logged in.")
@@ -163,10 +165,15 @@ public class AuthController {
 	public record SetPasswordRequest(@NotBlank String token, @NotNull String password) {
 	}
 
-	public record MeResponse(java.util.UUID id, String email, Role role) {
+	/**
+	 * @param firstName null if not set
+	 * @param lastName null if not set
+	 */
+	public record MeResponse(java.util.UUID id, String email, Role role, String firstName, String lastName) {
 
-		static MeResponse from(AuthUser user) {
-			return new MeResponse(user.id(), user.email(), user.role());
+		static MeResponse from(User user) {
+			return new MeResponse(user.getId(), user.getEmail(), user.getRole(), user.getFirstName(),
+					user.getLastName());
 		}
 
 	}

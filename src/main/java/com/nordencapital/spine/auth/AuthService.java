@@ -34,6 +34,8 @@ public class AuthService {
 
 	private final AuthLimiters limiters;
 
+	private final LoginEvents loginEvents;
+
 	private final Clock clock;
 
 	/**
@@ -43,13 +45,14 @@ public class AuthService {
 	private final String dummyHash;
 
 	public AuthService(UserRepository users, AuthTokenService tokens, PasswordEncoder passwordEncoder,
-			AuthMails mails, UserSessions sessions, AuthLimiters limiters, Clock clock) {
+			AuthMails mails, UserSessions sessions, AuthLimiters limiters, LoginEvents loginEvents, Clock clock) {
 		this.users = users;
 		this.tokens = tokens;
 		this.passwordEncoder = passwordEncoder;
 		this.mails = mails;
 		this.sessions = sessions;
 		this.limiters = limiters;
+		this.loginEvents = loginEvents;
 		this.clock = clock;
 		this.dummyHash = passwordEncoder.encode(UUID.randomUUID().toString());
 	}
@@ -57,11 +60,16 @@ public class AuthService {
 	/**
 	 * Checks email and password. Unknown, invited and disabled users all get the same
 	 * {@code invalid_credentials} error.
+	 * <p>
+	 * Every attempt of a known user is saved in the login history (success or not).
+	 * Unknown emails and attempts blocked by the limiter (429) are not saved. The
+	 * transaction is not rolled back by the 401, so failed attempts stay saved.
+	 * @return the logged-in user
 	 * @throws ApiException 401 {@code invalid_credentials} or 429
 	 * {@code too_many_attempts}
 	 */
-	@Transactional
-	public AuthUser login(String email, String password, String clientIp) {
+	@Transactional(noRollbackFor = ApiException.class)
+	public User login(String email, String password, String clientIp) {
 		String normalized = Emails.normalize(email);
 		String limitKey = normalized + "|" + clientIp;
 		if (this.limiters.login().isBlocked(limitKey)) {
@@ -74,12 +82,14 @@ public class AuthService {
 		boolean passwordOk = !PasswordPolicy.isTooLong(password) && this.passwordEncoder.matches(password, hash);
 		if (!canLogin || !passwordOk) {
 			this.limiters.login().record(limitKey);
+			found.ifPresent((user) -> this.loginEvents.record(user.getId(), false, clientIp, this.clock.instant()));
 			throw new ApiException(HttpStatus.UNAUTHORIZED, "invalid_credentials", "Invalid email or password");
 		}
 		this.limiters.login().reset(limitKey);
 		User user = found.get();
 		user.recordLogin(this.clock.instant());
-		return new AuthUser(user.getId(), user.getEmail(), user.getRole());
+		this.loginEvents.record(user.getId(), true, clientIp, this.clock.instant());
+		return user;
 	}
 
 	/**
@@ -129,10 +139,8 @@ public class AuthService {
 	 * @return empty if the user is gone or not ACTIVE any more
 	 */
 	@Transactional(readOnly = true)
-	public Optional<AuthUser> current(AuthUser principal) {
-		return this.users.findById(principal.id())
-			.filter((user) -> user.getStatus() == UserStatus.ACTIVE)
-			.map((user) -> new AuthUser(user.getId(), user.getEmail(), user.getRole()));
+	public Optional<User> current(AuthUser principal) {
+		return this.users.findById(principal.id()).filter((user) -> user.getStatus() == UserStatus.ACTIVE);
 	}
 
 	private static ApiException tokenInvalid() {

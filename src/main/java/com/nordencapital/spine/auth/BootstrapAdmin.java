@@ -1,6 +1,8 @@
 package com.nordencapital.spine.auth;
 
 import java.time.Clock;
+import java.time.Instant;
+import java.util.Optional;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,12 +21,14 @@ import com.nordencapital.spine.user.UserRepository;
 import com.nordencapital.spine.user.UserStatus;
 
 /**
- * Creates the first admin on startup.
+ * Creates the OWNER on startup.
  * <ul>
- * <li>No user at all: invite {@code APP_BOOTSTRAP_ADMIN_EMAIL} as ADMIN (status INVITED)
+ * <li>No user at all: invite {@code APP_BOOTSTRAP_ADMIN_EMAIL} as OWNER (status INVITED)
  * and email a set-password link.</li>
- * <li>Recovery: no ACTIVE admin yet, the bootstrap admin is still INVITED and its invite
- * has expired: send a new invite (so a restart fixes a lost or expired first link).</li>
+ * <li>No OWNER yet but the bootstrap email's user exists (databases from before the
+ * OWNER role): make that user the OWNER. A disabled one is enabled again.</li>
+ * <li>Recovery: the OWNER is still INVITED and its invite has expired: send a new invite
+ * (so a restart fixes a lost or expired first link).</li>
  * <li>Anything else: do nothing. Safe to run on every start.</li>
  * </ul>
  * No password is ever stored in code or config.
@@ -73,22 +77,37 @@ public class BootstrapAdmin implements ApplicationRunner {
 
 	private void bootstrap() {
 		if (this.users.count() == 0) {
-			User admin = this.users.save(User.invite(this.adminEmail, Role.ADMIN, this.clock.instant()));
+			User owner = this.users.save(User.invite(this.adminEmail, Role.OWNER, this.clock.instant()));
 			this.users.flush();
-			this.mails.sendInvite(admin.getEmail(), this.tokens.issue(admin, TokenPurpose.INVITE));
-			logger.info("Bootstrap admin: invited {} as the first ADMIN", admin.getEmail());
+			this.mails.sendInvite(owner.getEmail(), this.tokens.issue(owner, TokenPurpose.INVITE));
+			logger.info("Bootstrap admin: invited {} as the OWNER", owner.getEmail());
 			return;
 		}
-		if (this.users.existsByRoleAndStatus(Role.ADMIN, UserStatus.ACTIVE)) {
-			return;
-		}
-		this.users.findByEmail(this.adminEmail)
-			.filter((user) -> user.getRole() == Role.ADMIN && user.getStatus() == UserStatus.INVITED)
+		Optional<User> owner = this.users.findFirstByRole(Role.OWNER).or(this::promoteBootstrapUser);
+		owner.filter((user) -> user.getStatus() == UserStatus.INVITED)
 			.filter((user) -> !this.tokens.hasValidToken(user, TokenPurpose.INVITE))
 			.ifPresent((user) -> {
 				this.mails.sendInvite(user.getEmail(), this.tokens.issue(user, TokenPurpose.INVITE));
 				logger.info("Bootstrap admin: invite for {} had expired, sent a new one", user.getEmail());
 			});
+	}
+
+	/**
+	 * Makes the bootstrap email's user the OWNER (for databases from before the OWNER
+	 * role).
+	 */
+	private Optional<User> promoteBootstrapUser() {
+		Optional<User> found = this.users.findByEmail(this.adminEmail);
+		found.ifPresent((user) -> {
+			Instant now = this.clock.instant();
+			user.setRole(Role.OWNER, now);
+			if (user.getStatus() == UserStatus.DISABLED) {
+				user.setStatus((user.getPasswordHash() != null) ? UserStatus.ACTIVE : UserStatus.INVITED, now);
+			}
+			this.users.flush();
+			logger.info("Bootstrap admin: {} is now the OWNER", user.getEmail());
+		});
+		return found;
 	}
 
 }

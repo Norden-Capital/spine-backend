@@ -41,6 +41,12 @@ public class User {
 	@Column(name = "last_login_at")
 	private Instant lastLoginAt;
 
+	@Column(name = "first_name", length = 60)
+	private String firstName;
+
+	@Column(name = "last_name", length = 60)
+	private String lastName;
+
 	protected User() {
 	}
 
@@ -53,10 +59,6 @@ public class User {
 		user.createdAt = now;
 		user.updatedAt = now;
 		return user;
-	}
-
-	public boolean isActiveAdmin() {
-		return this.role == Role.ADMIN && this.status == UserStatus.ACTIVE;
 	}
 
 	public UUID getId() {
@@ -89,6 +91,23 @@ public class User {
 
 	public Instant getLastLoginAt() {
 		return this.lastLoginAt;
+	}
+
+	public String getFirstName() {
+		return this.firstName;
+	}
+
+	public String getLastName() {
+		return this.lastName;
+	}
+
+	/**
+	 * Names are stored trimmed by the caller; null means not set.
+	 */
+	public void setNames(String firstName, String lastName, Instant now) {
+		this.firstName = firstName;
+		this.lastName = lastName;
+		this.updatedAt = now;
 	}
 
 	public void setPasswordHash(String passwordHash, Instant now) {

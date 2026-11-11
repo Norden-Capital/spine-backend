@@ -73,6 +73,8 @@ public abstract class IntegrationTestBase {
 	void cleanDatabase() {
 		this.jdbc.update("DELETE FROM spring_session");
 		this.jdbc.update("DELETE FROM auth_tokens");
+		this.jdbc.update("DELETE FROM login_events");
+		this.jdbc.update("DELETE FROM user_preferences");
 		this.jdbc.update("DELETE FROM users");
 		this.limiters.clearAll();
 		this.mails.clear();
@@ -163,6 +165,15 @@ public abstract class IntegrationTestBase {
 
 		public MvcTestResult patch(String uri, String json) {
 			return sendWithCsrf(this.mvc.patch().uri(uri).contentType(MediaType.APPLICATION_JSON).content(json));
+		}
+
+		public MvcTestResult put(String uri, String json) {
+			return sendWithCsrf(this.mvc.put().uri(uri).contentType(MediaType.APPLICATION_JSON).content(json));
+		}
+
+		/** Same as {@link #put} but without the X-XSRF-TOKEN header. */
+		public MvcTestResult putWithoutCsrf(String uri, String json) {
+			return send(this.mvc.put().uri(uri).contentType(MediaType.APPLICATION_JSON).content(json));
 		}
 
 		public MvcTestResult login(String email, String password) {
