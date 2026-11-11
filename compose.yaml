@@ -1,0 +1,17 @@
+# Local development database only. Not used in production.
+# Spring Boot starts it automatically on `./mvnw spring-boot:run`,
+# or start it yourself with `docker compose up -d`.
+services:
+  postgres:
+    image: 'postgres:18'
+    environment:
+      - 'POSTGRES_DB=spine'
+      - 'POSTGRES_USER=spine'
+      - 'POSTGRES_PASSWORD=spine'
+    ports:
+      - '5432:5432'
+    volumes:
+      - 'spine-postgres-data:/var/lib/postgresql'
+
+volumes:
+  spine-postgres-data:
