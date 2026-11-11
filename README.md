@@ -63,8 +63,22 @@ See `.env.example`. Never commit real secrets.
 | `SPRING_DATASOURCE_PASSWORD` | Database password | `spine` |
 | `SERVER_PORT` | HTTP port | `8080` |
 | `APP_CORS_ALLOWED_ORIGINS` | Allowed origins for `/api/**`, comma-separated. Patterns like `https://*.vercel.app` work. | `http://localhost:3000` |
+| `APP_FRONTEND_URL` | Frontend address used in email links | `http://localhost:3000` |
+| `APP_MAIL_FROM` | Email sender, e.g. `Spine <no-reply@nordencapital.ca>` | `Spine <no-reply@localhost>` |
+| `RESEND_API_KEY` | Resend API key. Empty = emails are printed to the console | (empty) |
+| `APP_BOOTSTRAP_ADMIN_EMAIL` | First admin, invited on startup when there are no users | `admin@nordencapital.ca` |
 
-In the `prod` profile there are no defaults: the app will not start if a database or CORS variable is missing.
+In the `prod` profile there are no defaults: the app will not start if any of these variables is missing (and `RESEND_API_KEY` must not be empty).
+
+## Auth
+
+- No sign-up. An admin invites people by email; they set their own password from the link.
+- The first admin is created on startup when the database has no users (`APP_BOOTSTRAP_ADMIN_EMAIL`).
+  Locally the invite link is printed in the console.
+- Login creates a server-side session (stored in Postgres, `SESSION` cookie, 8 hours idle).
+- CSRF is on: call `GET /api/auth/csrf` once, then send the `XSRF-TOKEN` cookie value in the
+  `X-XSRF-TOKEN` header on every POST/PATCH/DELETE.
+- Full API list: Swagger UI (local only).
 
 ## Health checks
 

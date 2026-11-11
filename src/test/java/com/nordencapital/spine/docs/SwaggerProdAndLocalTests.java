@@ -11,7 +11,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Prod wins: even with the local profile also active, Swagger stays off.
  */
-@NoDatabaseSpringBootTest
+@SwaggerWebTest
 @ActiveProfiles({ "prod", "local" })
 class SwaggerProdAndLocalTests {
 

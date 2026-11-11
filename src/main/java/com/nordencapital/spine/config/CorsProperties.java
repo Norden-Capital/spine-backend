@@ -13,4 +13,11 @@ import org.springframework.validation.annotation.Validated;
 @Validated
 @ConfigurationProperties(prefix = "app.cors")
 public record CorsProperties(@NotEmpty List<String> allowedOrigins) {
+
+	public CorsProperties {
+		if (allowedOrigins != null) {
+			allowedOrigins.forEach((origin) -> RequiredSetting.check("app.cors.allowed-origins", origin));
+		}
+	}
+
 }

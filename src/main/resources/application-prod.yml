@@ -9,6 +9,13 @@ spring:
     compose:
       enabled: false
 
+server:
+  servlet:
+    session:
+      cookie:
+        # The browser reaches the API over https (through the Vercel proxy).
+        secure: true
+
 management:
   endpoint:
     health:
@@ -24,3 +31,11 @@ springdoc:
 app:
   cors:
     allowed-origins: ${APP_CORS_ALLOWED_ORIGINS}
+  frontend-url: ${APP_FRONTEND_URL}
+  mail:
+    from: ${APP_MAIL_FROM}
+    resend-api-key: ${RESEND_API_KEY}
+    # Fail at startup instead of silently printing emails to the log.
+    require-resend: true
+  bootstrap:
+    admin-email: ${APP_BOOTSTRAP_ADMIN_EMAIL}

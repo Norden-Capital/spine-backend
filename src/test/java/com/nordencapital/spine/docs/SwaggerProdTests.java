@@ -8,7 +8,7 @@ import org.springframework.test.web.servlet.assertj.MockMvcTester;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@NoDatabaseSpringBootTest
+@SwaggerWebTest
 @ActiveProfiles("prod")
 class SwaggerProdTests {
 

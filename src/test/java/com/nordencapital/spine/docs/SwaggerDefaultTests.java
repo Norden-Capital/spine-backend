@@ -10,7 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Safe by default: with no profile at all, Swagger is off.
  */
-@NoDatabaseSpringBootTest
+@SwaggerWebTest
 class SwaggerDefaultTests {
 
 	@Autowired
