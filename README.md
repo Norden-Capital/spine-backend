@@ -18,6 +18,8 @@ This starts the Postgres container from `compose.yaml` for you and runs the app 
 
 You can also start the database yourself with `docker compose up -d`.
 
+`spring-boot:run` uses the `local` profile, so Swagger UI is at http://localhost:8080/swagger-ui/index.html (it is always off in `prod`).
+
 Check that it works:
 
 ```bash

@@ -28,7 +28,27 @@ management:
       probes:
         enabled: true
 
+# API docs and Swagger UI are off by default. Only the "local" profile turns them on.
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
 app:
   cors:
     # Comma-separated list. Patterns like https://*.vercel.app are allowed.
     allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:3000}
+
+---
+# Local development: ./mvnw spring-boot:run activates the "local" profile (see pom.xml).
+# The "!prod" part keeps Swagger off even if both profiles are active.
+spring:
+  config:
+    activate:
+      on-profile: "local & !prod"
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true

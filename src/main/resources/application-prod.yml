@@ -14,6 +14,13 @@ management:
     health:
       show-details: never
 
+# API docs and Swagger UI must stay off in production. Never enable them here.
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
 app:
   cors:
     allowed-origins: ${APP_CORS_ALLOWED_ORIGINS}
