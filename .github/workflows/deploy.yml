@@ -1,4 +1,6 @@
 name: Deploy
+# Show the commit message (the CI run's title) instead of just "Deploy".
+run-name: ${{ github.event.workflow_run.display_title }}
 
 # Runs after the CI workflow finishes. We only deploy when CI passed on a
 # push to main, so tests are never skipped and are not run twice.
