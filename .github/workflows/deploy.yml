@@ -95,8 +95,15 @@ jobs:
             # Short-lived login with this run's token, so the server needs no
             # stored GHCR password. Log out right after the pull.
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            docker compose -f compose.prod.yaml pull || { docker logout ghcr.io; exit 1; }
+            # Retry: a pull can fail on a short network error (connection reset).
+            pulled=no
+            for try in 1 2 3; do
+              if docker compose -f compose.prod.yaml pull; then pulled=yes; break; fi
+              echo "Pull failed (try $try of 3), retrying in 10s"
+              sleep 10
+            done
             docker logout ghcr.io
+            [ "$pulled" = yes ] || { echo "Pull failed 3 times"; exit 1; }
 
             # --wait blocks until every service is healthy (the api healthcheck
             # calls /actuator/health/readiness) and fails the job if not.
