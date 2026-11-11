@@ -1,0 +1,84 @@
+# Production stack for Spine on the shared VPS.
+# Lives in /opt/spine next to a .env file (see .env.example).
+# Run: docker compose -f compose.prod.yaml up -d --wait
+#
+# Isolation from the other app on the VPS:
+# - own compose project ("spine") and own network
+# - own Postgres with a named volume and NO published port
+# - the API listens on 127.0.0.1 only; the existing Caddy proxies to it
+name: spine
+
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      # Postgres 18 images keep data under /var/lib/postgresql (not .../data).
+      - db-data:/var/lib/postgresql
+    networks:
+      - spine
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 512m # TODO: tune once we see the VPS size and real usage
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  api:
+    image: ghcr.io/norden-capital/spine-backend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL:?set SPRING_DATASOURCE_URL in .env}
+      SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME:?set SPRING_DATASOURCE_USERNAME in .env}
+      SPRING_DATASOURCE_PASSWORD: ${SPRING_DATASOURCE_PASSWORD:?set SPRING_DATASOURCE_PASSWORD in .env}
+      APP_CORS_ALLOWED_ORIGINS: ${APP_CORS_ALLOWED_ORIGINS:?set APP_CORS_ALLOWED_ORIGINS in .env}
+    ports:
+      # Localhost only. Caddy on the host reverse-proxies to this port.
+      - "127.0.0.1:${SPINE_API_PORT:-8090}:8080"
+    networks:
+      - spine
+    healthcheck:
+      # The temurin JRE image has no curl/wget we can rely on, so use bash's
+      # /dev/tcp to call the readiness probe and look for "UP".
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8080 &&
+          printf 'GET /actuator/health/readiness HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+          grep -q '"status":"UP"' <&3
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 768m # TODO: tune; the JVM uses 75% of this (MaxRAMPercentage=75)
+    logging: *logging
+
+networks:
+  spine:
+    name: spine
+
+volumes:
+  db-data:
+    name: spine-db-data
