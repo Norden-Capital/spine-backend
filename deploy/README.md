@@ -1,11 +1,26 @@
 # Deploy Spine API to the VPS
 
-The VPS already runs another app with Caddy and Docker.
+The VPS (169.58.174.211, Ubuntu 24.04) also runs another app, OneBase.
+**Never touch OneBase** (`/opt/onebase`, its containers, its Caddy).
 Spine runs next to it, alone:
 
 - its own Docker Compose project `spine`, its own network `spine`
 - its own Postgres; the database port is **not** open to the outside
-- the API listens only on `127.0.0.1:8090`; Caddy sends traffic to it
+- the API is on port `8090`, plain HTTP, open to the internet (temporary)
+
+## How traffic flows now (temporary)
+
+```
+phone browser → Vercel (HTTPS) → Vercel server proxies /api/* → http://169.58.174.211:8090
+```
+
+The browser only talks to Vercel. The OneBase Caddy owns ports 80/443, so we
+can't put HTTPS in front of Spine on this server yet.
+**Later:** a Cloudflare Tunnel + our own domain. Then set
+`SPINE_API_BIND=127.0.0.1` in `.env` and close 8090 in ufw.
+
+Note: ports published by Docker skip ufw. We still allow `8090/tcp` in ufw
+so the rules show what is really open.
 
 Files here:
 
@@ -13,125 +28,48 @@ Files here:
 | --- | --- |
 | `compose.prod.yaml` | Postgres + API containers |
 | `.env.example` | Template for the server `.env` file |
-| `Caddyfile.spine` | Caddy site block for the API |
 
-After the one-time setup, every push to `main` deploys by itself:
-CI passes → `.github/workflows/deploy.yml` builds the image, pushes it to
-GHCR, copies `compose.prod.yaml` to the server, pulls, starts and waits
-until the API is healthy. If the API is not healthy, the job fails.
+## Automatic deploy
 
-## One-time server setup
+Every push to `main`: CI passes → `.github/workflows/deploy.yml` builds the
+image, pushes it to GHCR, copies `compose.prod.yaml` to `/opt/spine`, pulls,
+starts and waits until the API is healthy. If not healthy, the job fails.
 
-Run these on the VPS as a user with `sudo`.
+The server logs in to GHCR with the job's own short-lived token, pulls, and
+logs out. So the image can stay **private** and the server keeps no GHCR
+password. (For a manual pull you need a token with `read:packages`.)
 
-### 1. Check the port is free
+## One-time server setup (already done)
 
-```bash
-sudo ss -ltnp | grep ':8090' || echo "8090 is free"
-```
+Run as root on the VPS.
 
-If 8090 is taken, pick another port and use it in `.env` and in the Caddy block.
-
-### 2. Make a deploy user
-
-```bash
-sudo adduser --disabled-password --gecos "" deploy
-sudo usermod -aG docker deploy
-```
-
-Note: being in the `docker` group is almost the same as root. Keep this key safe.
-
-### 3. Give GitHub an SSH key
-
-On your own computer (not the server):
-
-```bash
-ssh-keygen -t ed25519 -f spine_deploy -C "github-actions-spine" -N ""
-```
-
-On the server, add the **public** key (`spine_deploy.pub`):
-
-```bash
-sudo mkdir -p /home/deploy/.ssh
-sudo nano /home/deploy/.ssh/authorized_keys   # paste spine_deploy.pub
-sudo chown -R deploy:deploy /home/deploy/.ssh
-sudo chmod 700 /home/deploy/.ssh
-sudo chmod 600 /home/deploy/.ssh/authorized_keys
-```
-
-The **private** key (`spine_deploy`) goes into GitHub (step 6).
-
-### 4. Make the app folder and `.env`
-
-```bash
-sudo mkdir -p /opt/spine
-sudo chown deploy:deploy /opt/spine
-sudo -u deploy nano /opt/spine/.env   # paste .env.example, fill in values
-sudo chmod 600 /opt/spine/.env
-```
-
-Make the database password with `openssl rand -hex 32`.
-`compose.prod.yaml` is copied to `/opt/spine` by every deploy.
-For the first manual start you can copy it yourself.
-
-### 5. Add the Caddy block
-
-1. Open `Caddyfile.spine`. Change the host name and the port if needed.
-   No domain yet? Use the VPS IP, e.g. `api.203-0-113-10.sslip.io`.
-2. Put it on the server, for example `/etc/caddy/spine.caddy`.
-3. At the end of the main `/etc/caddy/Caddyfile` add:
-   ```
-   import /etc/caddy/spine.caddy
-   ```
-4. Check and reload (this does not stop the other app):
+1. Check the port is free: `ss -ltnp | grep ':8090' || echo free`
+2. App folder and env file:
    ```bash
-   sudo caddy validate --config /etc/caddy/Caddyfile
-   sudo systemctl reload caddy
+   mkdir -p /opt/spine && chmod 700 /opt/spine
+   # write /opt/spine/.env from .env.example; password: openssl rand -hex 32
+   chmod 600 /opt/spine/.env
    ```
+3. Firewall: `ufw allow 8090/tcp`
+4. Deploy key for GitHub: make a separate ed25519 key, add its public key to
+   `/root/.ssh/authorized_keys`, put the private key in the GitHub secret.
 
-If Caddy runs in Docker, not as a system service, read the note in
-`Caddyfile.spine` first: `127.0.0.1` means something else there.
+## GitHub secrets
 
-### 6. GitHub secrets
+Repo `Norden-Capital/spine-backend` → Settings → Secrets and variables → Actions.
 
-In GitHub: repo `Norden-Capital/spine-backend` → Settings → Secrets and
-variables → Actions → New repository secret.
+| Secret | Value |
+| --- | --- |
+| `VPS_HOST` | `169.58.174.211` |
+| `VPS_USER` | `root` |
+| `VPS_PORT` | `22` |
+| `VPS_SSH_KEY` | private deploy key (whole file) |
+| `VPS_HOST_FINGERPRINT` | `SHA256:...` from `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` |
 
-| Secret | Value | Needed |
-| --- | --- | --- |
-| `VPS_HOST` | VPS IP or host name | yes |
-| `VPS_USER` | `deploy` | yes |
-| `VPS_SSH_KEY` | the private key `spine_deploy` (whole file) | yes |
-| `VPS_PORT` | SSH port, if not 22 | no |
-| `VPS_HOST_FINGERPRINT` | SSH host key SHA256 fingerprint | no, but good |
+The job uses a GitHub environment named `production`. GitHub creates it on
+the first run. You can add "required reviewers" to it later.
 
-Get the fingerprint on the server:
-
-```bash
-ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
-```
-
-Copy only the `SHA256:...` part.
-
-The job also uses a GitHub environment named `production`. GitHub creates
-it on the first run. Later you can add "required reviewers" to it if you
-want to approve each deploy.
-
-### 7. Image access (GHCR)
-
-The deploy job logs the server in to GHCR with the job's own short-lived
-token, pulls, and logs out again. So the image can stay **private** and
-the server keeps no GHCR password.
-
-Only for a **manual** pull on the server (outside GitHub Actions) you need
-either a public package, or a login with a personal token that has
-`read:packages`.
-
-## First deploy
-
-Push to `main` (or re-run the last CI run). Watch the "Deploy" workflow.
-
-Check on the server:
+## Check it works
 
 ```bash
 cd /opt/spine
@@ -155,12 +93,3 @@ IMAGE_TAG=abc1234 docker compose -f compose.prod.yaml up -d --wait
 ```
 
 Images are tagged `latest` and the short git sha.
-
-## Needs a recent Docker Compose
-
-The deploy uses `docker compose up --wait --wait-timeout`. Old Compose
-versions do not have these flags. Check on the server:
-
-```bash
-docker compose up --help | grep -- --wait
-```
