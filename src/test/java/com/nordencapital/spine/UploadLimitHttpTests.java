@@ -30,7 +30,7 @@ class UploadLimitHttpTests extends IntegrationTestBase {
 
 	@Test
 	void tooBigUploadGets413Json() throws Exception {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		CookieManager cookies = new CookieManager();
 		HttpClient http = HttpClient.newBuilder().cookieHandler(cookies).build();
 

@@ -31,8 +31,8 @@ import com.nordencapital.spine.common.ParentPatch;
 import com.nordencapital.spine.common.Websites;
 import tools.jackson.databind.JsonNode;
 
-@Tag(name = "Categories", description = "Everyone reads active categories. /api/admin/categories is for OWNER and "
-		+ "ADMIN. Categories are never deleted, only archived.")
+@Tag(name = "Categories", description = "Everyone reads active categories. /api/admin/categories is for the "
+		+ "OWNER. Categories are never deleted, only archived.")
 @RestController
 public class CategoryController {
 
@@ -46,8 +46,10 @@ public class CategoryController {
 			description = "Active ones (and not under an archived parent), most used in the last 90 days first, then by "
 					+ "name. Flat list: group children by parentId.")
 	@GetMapping("/api/categories")
-	public List<CategoryPick> active(@AuthenticationPrincipal AuthUser actor) {
-		return this.service.active(actor);
+	public List<CategoryPick> active(@AuthenticationPrincipal AuthUser actor,
+			@io.swagger.v3.oas.annotations.Parameter(description = "EXPENSE or INCOME (left out = both)")
+			@org.springframework.web.bind.annotation.RequestParam(required = false) String kind) {
+		return this.service.active(actor, kind);
 	}
 
 	@Operation(summary = "Icons a category can use", description = "Lucide icon names.")
@@ -56,10 +58,14 @@ public class CategoryController {
 		return CategoryIcons.ALLOWED;
 	}
 
-	@Operation(summary = "All categories, archived too", description = "By name.")
+	@Operation(summary = "All categories, archived too",
+			description = "Manage-page order: each main category by position, followed by its subcategories by "
+					+ "position.")
 	@GetMapping("/api/admin/categories")
-	public List<CategoryResponse> all(@AuthenticationPrincipal AuthUser actor) {
-		return this.service.all(actor);
+	public List<CategoryResponse> all(@AuthenticationPrincipal AuthUser actor,
+			@io.swagger.v3.oas.annotations.Parameter(description = "EXPENSE or INCOME (left out = both)")
+			@org.springframework.web.bind.annotation.RequestParam(required = false) String kind) {
+		return this.service.all(actor, kind);
 	}
 
 	@Operation(summary = "Create a category",
@@ -74,7 +80,7 @@ public class CategoryController {
 	public ResponseEntity<CategoryResponse> create(@AuthenticationPrincipal AuthUser actor,
 			@Valid @RequestBody CreateRequest body) {
 		return ResponseEntity.status(HttpStatus.CREATED).body(this.service.create(actor, body.name(), body.icon(), body.parentId(),
-				body.website()));
+				body.website(), body.kind()));
 	}
 
 	@Operation(summary = "Change the name, icon and/or parent",
@@ -91,7 +97,22 @@ public class CategoryController {
 	public CategoryResponse update(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody UpdateRequest body) {
 		return this.service.update(actor, id, body.name(), body.icon(), ParentPatch.of(body.parentId()),
-				Websites.patch(body.website()));
+				Websites.patch(body.website()), body.kind());
+	}
+
+	@Operation(summary = "Move a category (drag and drop)",
+			description = "parentId: null = main category, or a main category id (one level only). position: 0-based "
+					+ "among the new siblings (too big = last). Siblings are renumbered. Archived ones can move too. "
+					+ "Returns ALL categories in manage-page order.")
+	@ApiResponse(responseCode = "200", description = "Moved")
+	@ApiResponse(responseCode = "400", description = "validation_error (own parent, under a subcategory, or it has "
+			+ "subcategories)", content = @Content(schema = @Schema(implementation = ApiError.class)))
+	@ApiResponse(responseCode = "404", description = "category_not_found",
+			content = @Content(schema = @Schema(implementation = ApiError.class)))
+	@PatchMapping("/api/admin/categories/{id}/move")
+	public List<CategoryResponse> move(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
+			@Valid @RequestBody MoveRequest body) {
+		return this.service.move(actor, id, body.parentId(), body.position());
 	}
 
 	@Operation(summary = "Archive a category", description = "Hidden from GET /api/categories. Old data keeps it.")
@@ -112,6 +133,14 @@ public class CategoryController {
 		return this.service.setArchived(actor, id, false);
 	}
 
+	/**
+	 * @param parentId null or left out = main category
+	 * @param position 0-based place among the new siblings
+	 */
+	public record MoveRequest(@Schema(nullable = true) UUID parentId,
+			@jakarta.validation.constraints.NotNull @jakarta.validation.constraints.Min(0) Integer position) {
+	}
+
 	/** The name is trimmed before validation. */
 	public record CreateRequest(
 			@NotBlank @Size(max = Names.MAX_LENGTH) @Pattern(regexp = Names.NO_CONTROL_CHARS,
@@ -119,7 +148,10 @@ public class CategoryController {
 			@Schema(description = "One of GET /api/categories/icons") @NotNull String icon,
 			@Schema(nullable = true, description = "A top-level category, or null") UUID parentId,
 			@Schema(nullable = true, description = "Optional website (logo), e.g. \"claude.ai\"; stored as the bare "
-					+ "domain") @Size(max = Websites.MAX_INPUT) String website) {
+					+ "domain") @Size(max = Websites.MAX_INPUT) String website,
+			@Schema(nullable = true, allowableValues = { "EXPENSE", "INCOME" },
+					description = "Main category: default EXPENSE. Subcategory: always its main's kind (left out = "
+							+ "that kind)") String kind) {
 
 		public CreateRequest {
 			name = Names.clean(name);
@@ -135,7 +167,9 @@ public class CategoryController {
 			@Schema(nullable = true, type = "string", format = "uuid",
 					description = "Leave out = keep; null = top level; an id = move under it") JsonNode parentId,
 			@Schema(nullable = true, type = "string",
-					description = "Leave out = keep; null or \"\" = remove; text = set") JsonNode website) {
+					description = "Leave out = keep; null or \"\" = remove; text = set") JsonNode website,
+			@Schema(nullable = true, allowableValues = { "EXPENSE", "INCOME" },
+					description = "Main categories only (its subcategories follow). Leave out = keep") String kind) {
 
 		public UpdateRequest {
 			name = Names.clean(name);

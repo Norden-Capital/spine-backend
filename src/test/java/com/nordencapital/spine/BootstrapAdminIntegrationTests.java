@@ -46,7 +46,7 @@ class BootstrapAdminIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void doesNothingWhenUsersExist() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		runBootstrap();
 
 		assertThat(this.users.findByEmail("bootstrap@example.com")).isEmpty();
@@ -77,13 +77,13 @@ class BootstrapAdminIntegrationTests extends IntegrationTestBase {
 	@Test
 	void existingBootstrapAdminBecomesTheOwner() {
 		// A database from before the OWNER role.
-		User old = activeUser("bootstrap@example.com", Role.ADMIN);
-		User otherAdmin = activeUser("admin@example.com", Role.ADMIN);
+		User old = activeUser("bootstrap@example.com", Role.MEMBER);
+		User otherAdmin = activeUser("admin@example.com", Role.MEMBER);
 		runBootstrap();
 
 		assertThat(reload(old.getId()).getRole()).isEqualTo(Role.OWNER);
 		assertThat(reload(old.getId()).getStatus()).isEqualTo(UserStatus.ACTIVE);
-		assertThat(reload(otherAdmin.getId()).getRole()).isEqualTo(Role.ADMIN);
+		assertThat(reload(otherAdmin.getId()).getRole()).isEqualTo(Role.MEMBER);
 		assertThat(this.mails.all()).isEmpty();
 
 		runBootstrap();
@@ -94,7 +94,7 @@ class BootstrapAdminIntegrationTests extends IntegrationTestBase {
 	@Test
 	void invitedBootstrapAdminBecomesOwnerAndKeepsItsInviteLink() {
 		// Live database state where the first admin never set a password.
-		User old = invitedUser("bootstrap@example.com", Role.ADMIN);
+		User old = invitedUser("bootstrap@example.com", Role.MEMBER);
 		String token = this.transaction.execute((status) -> this.tokens.issue(reload(old.getId()), TokenPurpose.INVITE));
 		runBootstrap();
 
@@ -111,7 +111,7 @@ class BootstrapAdminIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void invitedBootstrapAdminWithExpiredInviteGetsANewOneAsOwner() {
-		invitedUser("bootstrap@example.com", Role.ADMIN);
+		invitedUser("bootstrap@example.com", Role.MEMBER);
 		runBootstrap();
 
 		assertThat(this.mails.to("bootstrap@example.com")).hasSize(1);
@@ -120,7 +120,7 @@ class BootstrapAdminIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void disabledBootstrapUserIsEnabledWhenMadeOwner() {
-		User old = disabledUser("bootstrap@example.com", Role.ADMIN);
+		User old = disabledUser("bootstrap@example.com", Role.MEMBER);
 		runBootstrap();
 
 		assertThat(reload(old.getId()).getRole()).isEqualTo(Role.OWNER);
@@ -130,11 +130,11 @@ class BootstrapAdminIntegrationTests extends IntegrationTestBase {
 	@Test
 	void anExistingOwnerIsNeverReplaced() {
 		User owner = activeUser("first-owner@example.com", Role.OWNER);
-		User bootstrapUser = activeUser("bootstrap@example.com", Role.ADMIN);
+		User bootstrapUser = activeUser("bootstrap@example.com", Role.MEMBER);
 		runBootstrap();
 
 		assertThat(reload(owner.getId()).getRole()).isEqualTo(Role.OWNER);
-		assertThat(reload(bootstrapUser.getId()).getRole()).isEqualTo(Role.ADMIN);
+		assertThat(reload(bootstrapUser.getId()).getRole()).isEqualTo(Role.MEMBER);
 	}
 
 	@Test

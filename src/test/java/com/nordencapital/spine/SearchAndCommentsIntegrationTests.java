@@ -28,21 +28,19 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void filtersCombineAndTotalsFollowThem() {
-		User ada = activeUser("ada@example.com", Role.EMPLOYEE);
-		activeUser("bob@example.com", Role.EMPLOYEE);
+		// Ada is the owner: only the owner may filter by person.
+		User ada = activeUser("ada@example.com", Role.OWNER);
+		activeUser("bob@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
 		Client b = loggedIn("bob@example.com");
-		String clientX = tagId("Client X");
-		add(a, "EXPENSE", "100.00", "USD", "2026-03-05", "Taxi airport", "Transport", List.of(clientX));
-		add(a, "EXPENSE", "20.00", "USD", "2026-03-06", "Lunch with team", "Food", List.of());
-		add(b, "INCOME", "500.00", "USD", "2026-03-07", "Refund taxi", "Transport", List.of());
-		add(b, "EXPENSE", "300.00", "MAD", "2026-04-01", "Hotel", "Travel", List.of(clientX));
+		add(a, "EXPENSE", "100.00", "2026-03-05", "Taxi airport", "Transport");
+		add(a, "EXPENSE", "20.00", "2026-03-06", "Lunch with team", "Food");
+		incomeCategory("Refund");
+		add(b, "INCOME", "500.00", "2026-03-07", "Refund taxi", "Refund");
+		add(b, "EXPENSE", "300.00", "2026-04-01", "Hotel", "Travel");
 
 		assertItems(a.get("/api/transactions?from=2026-03-01&to=2026-04-30&q=TAXI"), "Refund taxi", "Taxi airport");
-		assertItems(a.get("/api/transactions?from=2026-03-01&to=2026-04-30&tagIds=" + clientX), "Hotel",
-				"Taxi airport");
 		assertItems(a.get("/api/transactions?from=2026-03-01&to=2026-04-30&type=INCOME"), "Refund taxi");
-		assertItems(a.get("/api/transactions?from=2026-03-01&to=2026-04-30&currency=MAD"), "Hotel");
 		assertItems(a.get("/api/transactions?from=2026-03-01&to=2026-04-30&createdBy=" + ada.getId()), "Lunch with team",
 				"Taxi airport");
 		assertItems(a.get("/api/transactions?from=2026-03-01&to=2026-04-30&minAmount=20&maxAmount=100"),
@@ -51,21 +49,20 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 		assertItems(a.get("/api/transactions?to=2026-03-05"), "Taxi airport");
 		assertItems(a.get("/api/transactions?month=2026-04"), "Hotel");
 		assertItems(a.get("/api/transactions?from=2026-03-01&to=2026-04-30&categoryIds=" + categoryId("Transport") + ","
-				+ categoryId("Food") + "&currency=USD&type=EXPENSE"), "Lunch with team", "Taxi airport");
+				+ categoryId("Food") + "&type=EXPENSE"), "Lunch with team", "Taxi airport");
 
 		MvcTestResult transport = a.get("/api/transactions?from=2026-03-01&to=2026-04-30&q=taxi");
-		assertThat(transport).bodyJson().extractingPath("$.totals.USD.in").isEqualTo("500.00");
-		assertThat(transport).bodyJson().extractingPath("$.totals.USD.out").isEqualTo("100.00");
-		assertThat(transport).bodyJson().extractingPath("$.totals.USD.net").isEqualTo("400.00");
-		assertThat(transport).bodyJson().extractingPath("$.totals.MAD.out").isEqualTo("0.00");
+		assertThat(transport).bodyJson().extractingPath("$.totals.in").isEqualTo("500.00");
+		assertThat(transport).bodyJson().extractingPath("$.totals.out").isEqualTo("100.00");
+		assertThat(transport).bodyJson().extractingPath("$.totals.net").isEqualTo("400.00");
 	}
 
 	@Test
 	void pagingKeepsTotalsOfAllMatches() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
 		for (int i = 1; i <= 5; i++) {
-			add(a, "EXPENSE", i + ".00", "USD", "2026-03-0" + i, "Item " + i, "Food", List.of());
+			add(a, "EXPENSE", i + ".00", "2026-03-0" + i, "Item " + i, "Food");
 		}
 		MvcTestResult first = a.get("/api/transactions?month=2026-03&size=2");
 		assertThat(first).bodyJson().extractingPath("$.items[*].description").asArray().containsExactly("Item 5", "Item 4");
@@ -73,7 +70,7 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 		assertThat(first).bodyJson().extractingPath("$.size").isEqualTo(2);
 		assertThat(first).bodyJson().extractingPath("$.totalItems").isEqualTo(5);
 		assertThat(first).bodyJson().extractingPath("$.hasNext").isEqualTo(true);
-		assertThat(first).bodyJson().extractingPath("$.totals.USD.out").isEqualTo("15.00");
+		assertThat(first).bodyJson().extractingPath("$.totals.out").isEqualTo("15.00");
 
 		MvcTestResult last = a.get("/api/transactions?month=2026-03&size=2&page=2");
 		assertThat(last).bodyJson().extractingPath("$.items[*].description").asArray().containsExactly("Item 1");
@@ -83,11 +80,11 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void searchFindsCommentsAndTreatsWildcardsAsText() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
-		String id = add(a, "EXPENSE", "10.00", "USD", "2026-03-05", "Coffee", "Food", List.of());
-		add(a, "EXPENSE", "11.00", "USD", "2026-03-06", "Code A_1", "Food", List.of());
-		add(a, "EXPENSE", "12.00", "USD", "2026-03-07", "Code AB1", "Food", List.of());
+		String id = add(a, "EXPENSE", "10.00", "2026-03-05", "Coffee", "Food");
+		add(a, "EXPENSE", "11.00", "2026-03-06", "Code A_1", "Food");
+		add(a, "EXPENSE", "12.00", "2026-03-07", "Code AB1", "Food");
 		a.post("/api/transactions/" + id + "/comments", "{\"text\":\"Meeting with the Atlas client\"}");
 
 		assertItems(a.get("/api/transactions?month=2026-03&q=atlas"), "Coffee");
@@ -97,12 +94,31 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 	}
 
 	@Test
-	void badFiltersAreRefused() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+	void searchMatchesWebsiteAndSizeZeroOnlyCounts() {
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
-		for (String bad : List.of("from=2026-02-30", "from=2026-05-01&to=2026-04-01", "type=GIFT", "currency=EUR",
-				"createdBy=nope", "minAmount=1.234", "minAmount=10&maxAmount=5", "page=-1", "size=101", "size=0",
-				"categoryIds=x", "tagIds=1,2", "month=2026-13")) {
+		add(a, "EXPENSE", "20.00", "2026-03-05", "Monthly plan", "Software");
+		add(a, "EXPENSE", "30.00", "2026-03-06", "Lunch", "Food");
+		this.jdbc.update("UPDATE transactions SET website = 'claude.ai' WHERE description = 'Monthly plan'");
+
+		assertItems(a.get("/api/transactions?month=2026-03&q=CLAUDE"), "Monthly plan");
+		assertItems(a.get("/api/transactions?month=2026-03&q=claude.ai"), "Monthly plan");
+
+		MvcTestResult countOnly = a.get("/api/transactions?month=2026-03&size=0");
+		assertThat(countOnly).hasStatus(HttpStatus.OK);
+		assertThat(countOnly).bodyJson().extractingPath("$.items.length()").isEqualTo(0);
+		assertThat(countOnly).bodyJson().extractingPath("$.totalItems").isEqualTo(2);
+		assertThat(countOnly).bodyJson().extractingPath("$.hasNext").isEqualTo(false);
+		assertThat(countOnly).bodyJson().extractingPath("$.totals.out").isEqualTo("50.00");
+	}
+
+	@Test
+	void badFiltersAreRefused() {
+		activeUser("ada@example.com", Role.MEMBER);
+		Client a = loggedIn("ada@example.com");
+		for (String bad : List.of("from=2026-02-30", "from=2026-05-01&to=2026-04-01", "type=GIFT",
+				"createdBy=nope", "minAmount=1.234", "minAmount=10&maxAmount=5", "page=-1", "size=101", "size=-1",
+				"categoryIds=x", "month=2026-13")) {
 			MvcTestResult result = a.get("/api/transactions?" + bad);
 			assertThat(result).as(bad).hasStatus(HttpStatus.BAD_REQUEST);
 			assertThat(result).bodyJson().extractingPath("$.error").isEqualTo("validation_error");
@@ -113,7 +129,7 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void subcategoriesAreOneLevelAndParentIncludesChildren() {
-		activeUser("admin@example.com", Role.ADMIN);
+		activeUser("admin@example.com", Role.OWNER);
 		Client admin = loggedIn("admin@example.com");
 		String travel = categoryId("Travel");
 		String flights = createdCategory(admin, "Flights", travel);
@@ -139,20 +155,20 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 		assertThat(admin.patch("/api/admin/categories/" + flights, "{\"parentId\":\"" + travel + "\"}"))
 			.hasStatus(HttpStatus.OK);
 
-		add(admin, "EXPENSE", "250.00", "USD", "2026-03-05", "Flight", "Flights", List.of());
-		add(admin, "EXPENSE", "80.00", "USD", "2026-03-06", "Train", "Travel", List.of());
-		add(admin, "EXPENSE", "9.00", "USD", "2026-03-07", "Sandwich", "Food", List.of());
+		add(admin, "EXPENSE", "250.00", "2026-03-05", "Flight", "Flights");
+		add(admin, "EXPENSE", "80.00", "2026-03-06", "Train", "Travel");
+		add(admin, "EXPENSE", "9.00", "2026-03-07", "Sandwich", "Food");
 		assertItems(admin.get("/api/transactions?month=2026-03&categoryIds=" + travel), "Train", "Flight");
 		assertItems(admin.get("/api/transactions?month=2026-03&categoryIds=" + flights), "Flight");
 	}
 
 	@Test
 	void archivedParentHidesChildrenEverywhereNew() {
-		activeUser("admin@example.com", Role.ADMIN);
+		activeUser("admin@example.com", Role.OWNER);
 		Client admin = loggedIn("admin@example.com");
 		String travel = categoryId("Travel");
 		createdCategory(admin, "Flights", travel);
-		String oldTx = add(admin, "EXPENSE", "250.00", "USD", TODAY, "Flight", "Flights", List.of());
+		String oldTx = add(admin, "EXPENSE", "250.00", TODAY, "Flight", "Flights");
 		admin.post("/api/admin/categories/" + travel + "/archive", "");
 
 		assertThat(admin.get("/api/categories")).bodyJson()
@@ -160,7 +176,7 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 			.asArray()
 			.doesNotContain("Travel", "Flights");
 		MvcTestResult refused = admin.post("/api/transactions",
-				body("EXPENSE", "1.00", "USD", TODAY, "New flight", "Flights", List.of(), List.of(upload(admin))));
+				body("EXPENSE", "1.00", TODAY, "New flight", "Flights", List.of(upload(admin))));
 		assertValidation(refused);
 		// The old transaction keeps it.
 		assertThat(admin.get("/api/transactions/" + oldTx)).bodyJson()
@@ -172,18 +188,14 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void pickersShowMostUsedFirst() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
-		String zebra = tagId("Zebra");
-		tagId("Alpha");
-		add(a, "EXPENSE", "1.00", "USD", TODAY, "x1", "Travel", List.of(zebra));
-		add(a, "EXPENSE", "2.00", "USD", TODAY, "x2", "Travel", List.of(zebra));
-		add(a, "EXPENSE", "3.00", "USD", TODAY, "x3", "Office", List.of());
+		add(a, "EXPENSE", "1.00", TODAY, "x1", "Travel");
+		add(a, "EXPENSE", "2.00", TODAY, "x2", "Travel");
+		add(a, "EXPENSE", "3.00", TODAY, "x3", "Office");
 		// Older than 90 days: does not count.
-		add(a, "EXPENSE", "4.00", "USD", LocalDate.now(ZoneOffset.UTC).minusDays(120).toString(), "old", "Bills",
-				List.of());
-		add(a, "EXPENSE", "5.00", "USD", LocalDate.now(ZoneOffset.UTC).minusDays(121).toString(), "old2", "Bills",
-				List.of());
+		add(a, "EXPENSE", "4.00", LocalDate.now(ZoneOffset.UTC).minusDays(120).toString(), "old", "Bills");
+		add(a, "EXPENSE", "5.00", LocalDate.now(ZoneOffset.UTC).minusDays(121).toString(), "old2", "Bills");
 
 		MvcTestResult categories = a.get("/api/categories");
 		assertThat(categories).bodyJson()
@@ -193,23 +205,20 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 		assertThat(categories).bodyJson().extractingPath("$[0].usageCount").isEqualTo(2);
 		assertThat(categories).bodyJson().extractingPath("$[2].usageCount").isEqualTo(0);
 
-		MvcTestResult tags = a.get("/api/tags");
-		assertThat(tags).bodyJson().extractingPath("$[*].name").asArray().containsExactly("Zebra", "Alpha");
-		assertThat(tags).bodyJson().extractingPath("$[0].usageCount").isEqualTo(2);
 	}
 
 	// ---- D. duplicates ----
 
 	@Test
-	void sameTypeAmountCurrencyAndDateAsksForConfirmation() {
-		User ada = activeUser("ada@example.com", Role.EMPLOYEE);
+	void sameTypeAmountAndDateAsksForConfirmation() {
+		User ada = activeUser("ada@example.com", Role.MEMBER);
 		setName(ada, "Ada", "L");
-		activeUser("bob@example.com", Role.EMPLOYEE);
+		activeUser("bob@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
-		String first = add(a, "EXPENSE", "42.00", "USD", TODAY, "Taxi", "Transport", List.of());
+		String first = add(a, "EXPENSE", "42.00", TODAY, "Taxi", "Transport");
 
 		Client b = loggedIn("bob@example.com");
-		String body = body("EXPENSE", "42", "USD", TODAY, "Cab", "Travel", List.of(), List.of(upload(b)));
+		String body = body("EXPENSE", "42", TODAY, "Cab", "Travel", List.of(upload(b)));
 		MvcTestResult duplicate = b.post("/api/transactions", body);
 		assertThat(duplicate).hasStatus(HttpStatus.CONFLICT);
 		assertThat(duplicate).bodyJson().extractingPath("$.error").isEqualTo("possible_duplicate");
@@ -220,21 +229,22 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 
 		assertThat(b.post("/api/transactions", TransactionsIntegrationTests.confirmed(body)))
 			.hasStatus(HttpStatus.CREATED);
-		// Other amount, currency, type or date: no warning. Trashed: no warning.
-		assertThat(b.post("/api/transactions", body("INCOME", "42", "USD", TODAY, "x", "Food", List.of(), List.of(upload(b)))))
+		// Other amount, type or date: no warning. Trashed: no warning.
+		incomeCategory("Refund");
+		assertThat(b.post("/api/transactions", body("INCOME", "42", TODAY, "x", "Refund", List.of(upload(b)))))
 			.hasStatus(HttpStatus.CREATED);
 		a.delete("/api/transactions/" + first);
 		this.jdbc.update("UPDATE transactions SET deleted_at = now() WHERE type = 'EXPENSE'");
-		assertThat(b.post("/api/transactions", body("EXPENSE", "42", "USD", TODAY, "x", "Food", List.of(), List.of(upload(b)))))
+		assertThat(b.post("/api/transactions", body("EXPENSE", "42", TODAY, "x", "Food", List.of(upload(b)))))
 			.hasStatus(HttpStatus.CREATED);
 	}
 
 	@Test
 	void validationComesBeforeTheDuplicateWarning() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
-		add(a, "EXPENSE", "42.00", "USD", TODAY, "Taxi", "Transport", List.of());
-		assertThat(a.post("/api/transactions", body("EXPENSE", "42", "USD", TODAY, "x", "Food", List.of(), List.of())))
+		add(a, "EXPENSE", "42.00", TODAY, "Taxi", "Transport");
+		assertThat(a.post("/api/transactions", body("EXPENSE", "42", TODAY, "x", "Food", List.of())))
 			.bodyJson()
 			.extractingPath("$.error")
 			.isEqualTo("proof_required");
@@ -244,12 +254,12 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void commentsRules() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
-		User bob = activeUser("bob@example.com", Role.EMPLOYEE);
-		activeUser("admin@example.com", Role.ADMIN);
+		activeUser("ada@example.com", Role.MEMBER);
+		User bob = activeUser("bob@example.com", Role.MEMBER);
+		activeUser("admin@example.com", Role.OWNER);
 		Client a = loggedIn("ada@example.com");
 		Client b = loggedIn("bob@example.com");
-		String id = add(a, "EXPENSE", "10.00", "USD", TODAY, "Taxi", "Transport", List.of());
+		String id = add(a, "EXPENSE", "10.00", TODAY, "Taxi", "Transport");
 
 		MvcTestResult added = b.post("/api/transactions/" + id + "/comments", "{\"text\":\"  For the Atlas visit  \"}");
 		assertThat(added).hasStatus(HttpStatus.CREATED);
@@ -283,10 +293,10 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 
 	// ---- helpers ----
 
-	private String add(Client client, String type, String amount, String currency, String date, String description,
-			String category, List<String> tags) {
+	private String add(Client client, String type, String amount, String date, String description,
+			String category) {
 		MvcTestResult result = client.post("/api/transactions", TransactionsIntegrationTests
-			.confirmed(body(type, amount, currency, date, description, category, tags, List.of(upload(client)))));
+			.confirmed(body(type, amount, date, description, category, List.of(upload(client)))));
 		assertThat(result).hasStatus(HttpStatus.CREATED);
 		try {
 			return result.getResponse().getContentAsString().replaceAll("^\\{\"id\":\"([^\"]+)\".*", "$1");
@@ -307,13 +317,6 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 		return FilesIntegrationTests.uploadedId(client.upload("proof.pdf", "application/pdf", TestFiles.PDF));
 	}
 
-	private String tagId(String name) {
-		UUID id = UUID.randomUUID();
-		this.jdbc.update("INSERT INTO tags (id, name, archived, created_at, updated_at) VALUES (?, ?, false, now(), now())",
-				id, name);
-		return id.toString();
-	}
-
 	private String categoryId(String name) {
 		return this.jdbc.queryForObject("SELECT id::text FROM categories WHERE name = ?", String.class, name);
 	}
@@ -322,11 +325,11 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 		this.jdbc.update("UPDATE users SET first_name = ?, last_name = ? WHERE id = ?", first, last, user.getId());
 	}
 
-	private String body(String type, String amount, String currency, String date, String description, String category,
-			List<String> tagIds, List<String> fileIds) {
-		return "{\"type\":\"" + type + "\",\"amount\":\"" + amount + "\",\"currency\":\"" + currency + "\",\"date\":\""
+	private String body(String type, String amount, String date, String description, String category,
+			List<String> fileIds) {
+		return "{\"type\":\"" + type + "\",\"amount\":\"" + amount + "\",\"date\":\""
 				+ date + "\",\"description\":\"" + description + "\",\"categoryId\":\"" + categoryId(category)
-				+ "\",\"tagIds\":" + ids(tagIds) + ",\"fileIds\":" + ids(fileIds) + "}";
+				+ "\",\"fileIds\":" + ids(fileIds) + "}";
 	}
 
 	private static String ids(List<String> ids) {

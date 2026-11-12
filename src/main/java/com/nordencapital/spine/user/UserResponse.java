@@ -9,11 +9,12 @@ import java.util.UUID;
  * reset password, resend invite)
  */
 public record UserResponse(UUID id, String email, String firstName, String lastName, Role role, UserStatus status,
-		Instant createdAt, Instant lastLoginAt, boolean canManage) {
+		Instant createdAt, Instant lastLoginAt, boolean canManage, String avatarSeed) {
 
 	public static UserResponse from(User user, boolean canManage) {
 		return new UserResponse(user.getId(), user.getEmail(), user.getFirstName(), user.getLastName(),
-				user.getRole(), user.getStatus(), user.getCreatedAt(), user.getLastLoginAt(), canManage);
+				user.getRole(), user.getStatus(), user.getCreatedAt(), user.getLastLoginAt(), canManage,
+				user.avatarSeed());
 	}
 
 }

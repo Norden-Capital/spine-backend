@@ -5,7 +5,7 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * A new transaction looks like one that already exists (same type, amount, currency
+ * A new transaction looks like one that already exists (same type, amount
  * and date). Answered as 409 {@code possible_duplicate} with the matches; the client
  * can send again with "confirmDuplicate": true.
  */
@@ -14,7 +14,7 @@ public class DuplicateException extends RuntimeException {
 	private final List<Match> matches;
 
 	public DuplicateException(List<Match> matches) {
-		super("A transaction with the same type, amount, currency and date already exists");
+		super("A transaction with the same type, amount and date already exists");
 		this.matches = List.copyOf(matches);
 	}
 
@@ -27,7 +27,8 @@ public class DuplicateException extends RuntimeException {
 	}
 
 	/** A user shown by name. */
-	public record UserRef(UUID id, String name) {
+	/** @param avatarSeed DiceBear seed (never null) */
+	public record UserRef(UUID id, String name, String avatarSeed) {
 	}
 
 	/** The 409 body. */

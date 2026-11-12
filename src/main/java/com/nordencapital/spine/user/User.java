@@ -47,6 +47,10 @@ public class User {
 	@Column(name = "last_name", length = 60)
 	private String lastName;
 
+	/** Chosen face seed, or null (default from the id). */
+	@Column(name = "avatar_seed", length = 64)
+	private String avatarSeed;
+
 	protected User() {
 	}
 
@@ -130,6 +134,17 @@ public class User {
 
 	public void setStatus(UserStatus status, Instant now) {
 		this.status = status;
+		this.updatedAt = now;
+	}
+
+	/** The face seed to show: the chosen one, or a default made from the id. */
+	public String avatarSeed() {
+		return Avatars.seed(this.id, this.avatarSeed);
+	}
+
+	/** @param seed a checked seed, or null for the default */
+	public void setAvatarSeed(String seed, Instant now) {
+		this.avatarSeed = seed;
 		this.updatedAt = now;
 	}
 

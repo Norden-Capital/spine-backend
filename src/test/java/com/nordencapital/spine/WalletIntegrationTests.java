@@ -20,8 +20,8 @@ import com.nordencapital.spine.wallet.WalletRecurring;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The private wallet: PIN and lock, privacy (even against OWNER and ADMIN), categories,
- * tags, transactions, files, budgets and alerts, goals, recurring job, dashboard.
+ * The private wallet: PIN and lock, privacy (even against the OWNER), categories,
+ * transactions, files, budgets and alerts, goals, recurring job, dashboard.
  */
 class WalletIntegrationTests extends IntegrationTestBase {
 
@@ -36,7 +36,7 @@ class WalletIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void pinSetUnlockAndLock() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
 
 		assertThat(a.get("/api/wallet/status")).bodyJson().isStrictlyEqualTo(
@@ -69,7 +69,7 @@ class WalletIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void fiveWrongPinsLockForFiveMinutes() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = wallet("ada@example.com");
 		a.post("/api/wallet/lock", "");
 		for (int i = 0; i < 4; i++) {
@@ -89,7 +89,7 @@ class WalletIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void resetPinWithAccountPassword() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = wallet("ada@example.com");
 		a.post("/api/wallet/lock", "");
 		assertError(a.post("/api/wallet/pin/reset", "{\"password\":\"wrong-password-1\",\"newPin\":\"654321\"}"),
@@ -105,23 +105,23 @@ class WalletIntegrationTests extends IntegrationTestBase {
 	// ---- privacy ----
 
 	@Test
-	void walletIsPrivateEvenForOwnerAndAdmin() throws Exception {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+	void walletIsPrivateEvenForTheOwner() throws Exception {
+		activeUser("ada@example.com", Role.MEMBER);
 		activeUser("owner@example.com", Role.OWNER);
-		activeUser("admin@example.com", Role.ADMIN);
+		activeUser("admin@example.com", Role.MEMBER);
 		Client ada = wallet("ada@example.com");
 		String category = walletCategoryId(ada, "Food");
 		String file = FilesIntegrationTests.uploadedId(ada.upload("private.pdf", "application/pdf", TestFiles.PDF));
 		String tx = created(ada.post("/api/wallet/transactions",
-				walletBody("EXPENSE", "15.00", "USD", TODAY.toString(), "Doctor", category, List.of(file))));
-		ada.post("/api/wallet/goals", "{\"name\":\"Trip\",\"target\":\"1000\",\"currency\":\"USD\"}");
-		ada.post("/api/wallet/budgets", "{\"currency\":\"USD\",\"limit\":\"100\"}");
+				walletBody("EXPENSE", "15.00", TODAY.toString(), "Doctor", category, List.of(file))));
+		ada.post("/api/wallet/goals", "{\"name\":\"Trip\",\"target\":\"1000\"}");
+		ada.post("/api/wallet/budgets", "{\"limit\":\"100\"}");
 
 		for (String email : List.of("owner@example.com", "admin@example.com")) {
 			Client boss = wallet(email);
 			assertError(boss.get("/api/wallet/transactions/" + tx), HttpStatus.NOT_FOUND, "transaction_not_found");
 			assertError(boss.put("/api/wallet/transactions/" + tx,
-					walletBody("EXPENSE", "1.00", "USD", TODAY.toString(), "x", category, List.of())),
+					walletBody("EXPENSE", "1.00", TODAY.toString(), "x", category, List.of())),
 					HttpStatus.NOT_FOUND, "transaction_not_found");
 			assertError(boss.delete("/api/wallet/transactions/" + tx), HttpStatus.NOT_FOUND, "transaction_not_found");
 			assertThat(boss.get("/api/wallet/transactions?from=2000-01-01")).bodyJson()
@@ -146,16 +146,21 @@ class WalletIntegrationTests extends IntegrationTestBase {
 		assertThat(ada.get("/api/files/" + file)).hasStatus(HttpStatus.OK);
 	}
 
-	// ---- categories and tags ----
+	// ---- categories ----
 
 	@Test
-	void startingCategoriesSubcategoriesAndTags() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+	void startingCategoriesAndSubcategories() {
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = wallet("ada@example.com");
 		assertThat(a.get("/api/wallet/categories")).bodyJson()
 			.extractingPath("$[*].name")
 			.asArray()
-			.containsExactly("Bills", "Food", "Fun", "Health", "Other", "Salary", "Shopping", "Transport");
+			.containsExactly("Bills", "Client payment", "Food", "Fun", "Health", "Investment", "Other", "Other income",
+					"Refund", "Salary", "Shopping", "Transport");
+		assertThat(a.get("/api/wallet/categories?kind=INCOME")).bodyJson()
+			.extractingPath("$[*].name")
+			.asArray()
+			.containsExactly("Client payment", "Investment", "Other income", "Refund", "Salary");
 
 		String food = walletCategoryId(a, "Food");
 		MvcTestResult child = a.post("/api/wallet/categories",
@@ -174,29 +179,21 @@ class WalletIntegrationTests extends IntegrationTestBase {
 			.extractingPath("$[*].name")
 			.asArray()
 			.doesNotContain("Food", "Restaurants");
-		assertThat(a.get("/api/wallet/categories/all")).bodyJson().extractingPath("$.length()").isEqualTo(9);
+		assertThat(a.get("/api/wallet/categories/all")).bodyJson().extractingPath("$.length()").isEqualTo(13);
 
-		MvcTestResult tag = a.post("/api/wallet/tags", "{\"name\":\"Kids\"}");
-		assertThat(tag).hasStatus(HttpStatus.CREATED);
-		assertThat(a.post("/api/wallet/tags", "{\"name\":\"kids\"}")).hasStatus(HttpStatus.OK);
-		String tagId = this.jdbc.queryForObject("SELECT id::text FROM wallet_tags", String.class);
-		a.post("/api/wallet/tags/" + tagId + "/archive", "");
-		assertError(a.post("/api/wallet/tags", "{\"name\":\"KIDS\"}"), HttpStatus.CONFLICT, "tag_archived");
-		// Wallet tags are not company tags.
-		assertThat(a.get("/api/tags")).bodyJson().extractingPath("$.length()").isEqualTo(0);
 	}
 
 	// ---- transactions ----
 
 	@Test
 	void transactionsCrudFilesOptionalAndHardDelete() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = wallet("ada@example.com");
 		String food = walletCategoryId(a, "Food");
 		String salary = walletCategoryId(a, "Salary");
 
 		MvcTestResult noFile = a.post("/api/wallet/transactions",
-				walletBody("EXPENSE", "12.5", "MAD", TODAY.toString(), "Groceries", food, List.of()));
+				walletBody("EXPENSE", "12.5", TODAY.toString(), "Groceries", food, List.of()));
 		assertThat(noFile).hasStatus(HttpStatus.CREATED);
 		assertThat(noFile).bodyJson().extractingPath("$.amount").isEqualTo("12.50");
 		assertThat(noFile).bodyJson().extractingPath("$.category.name").isEqualTo("Food");
@@ -205,26 +202,26 @@ class WalletIntegrationTests extends IntegrationTestBase {
 
 		String file = FilesIntegrationTests.uploadedId(a.upload("slip.jpg", "image/jpeg", TestFiles.JPEG));
 		String salaryTx = created(a.post("/api/wallet/transactions",
-				walletBody("INCOME", "3000", "MAD", TODAY.toString(), "Salary", salary, List.of(file))));
+				walletBody("INCOME", "3000", TODAY.toString(), "Salary", salary, List.of(file))));
 		String key = this.jdbc.queryForObject("SELECT storage_key FROM files", String.class);
 
 		// Duplicate warning (my own only).
 		MvcTestResult duplicate = a.post("/api/wallet/transactions",
-				walletBody("EXPENSE", "12.50", "MAD", TODAY.toString(), "Again", food, List.of()));
+				walletBody("EXPENSE", "12.50", TODAY.toString(), "Again", food, List.of()));
 		assertError(duplicate, HttpStatus.CONFLICT, "possible_duplicate");
 		assertThat(duplicate).bodyJson().extractingPath("$.matches[0].description").isEqualTo("Groceries");
 		assertThat(a.post("/api/wallet/transactions", TransactionsIntegrationTests.confirmed(
-				walletBody("EXPENSE", "12.50", "MAD", TODAY.toString(), "Again", food, List.of()))))
+				walletBody("EXPENSE", "12.50", TODAY.toString(), "Again", food, List.of()))))
 			.hasStatus(HttpStatus.CREATED);
 
 		assertThat(a.put("/api/wallet/transactions/" + salaryTx,
-				walletBody("INCOME", "3100", "MAD", TODAY.toString(), "Salary + bonus", salary, List.of(file))))
+				walletBody("INCOME", "3100", TODAY.toString(), "Salary + bonus", salary, List.of(file))))
 			.hasStatus(HttpStatus.OK)
 			.bodyJson()
 			.extractingPath("$.amount")
 			.isEqualTo("3100.00");
 		assertError(a.post("/api/wallet/transactions",
-				walletBody("EXPENSE", "1", "MAD", TODAY.plusDays(2).toString(), "Future", food, List.of())),
+				walletBody("EXPENSE", "1", TODAY.plusDays(2).toString(), "Future", food, List.of())),
 				HttpStatus.BAD_REQUEST, "future_date");
 
 		assertThat(a.delete("/api/wallet/transactions/" + salaryTx)).hasStatus(HttpStatus.NO_CONTENT);
@@ -234,13 +231,13 @@ class WalletIntegrationTests extends IntegrationTestBase {
 
 		MvcTestResult list = a.get("/api/wallet/transactions?q=groc");
 		assertThat(list).bodyJson().extractingPath("$.items[*].description").asArray().containsExactly("Groceries");
-		assertThat(a.get("/api/wallet/transactions")).bodyJson().extractingPath("$.totals.MAD.out").isEqualTo("25.00");
+		assertThat(a.get("/api/wallet/transactions")).bodyJson().extractingPath("$.totals.out").isEqualTo("25.00");
 	}
 
 	@Test
 	void walletCannotUseCompanyOrOtherPeoplesThings() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
-		activeUser("bob@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
+		activeUser("bob@example.com", Role.MEMBER);
 		Client a = wallet("ada@example.com");
 		Client b = wallet("bob@example.com");
 		String bobsFood = walletCategoryId(b, "Food");
@@ -249,12 +246,12 @@ class WalletIntegrationTests extends IntegrationTestBase {
 		String bobsFile = FilesIntegrationTests.uploadedId(b.upload("b.pdf", "application/pdf", TestFiles.PDF));
 
 		assertError(a.post("/api/wallet/transactions",
-				walletBody("EXPENSE", "1", "USD", TODAY.toString(), "x", bobsFood, List.of())), HttpStatus.BAD_REQUEST,
+				walletBody("EXPENSE", "1", TODAY.toString(), "x", bobsFood, List.of())), HttpStatus.BAD_REQUEST,
 				"validation_error");
 		assertError(a.post("/api/wallet/transactions",
-				walletBody("EXPENSE", "1", "USD", TODAY.toString(), "x", companyFood, List.of())), HttpStatus.BAD_REQUEST,
+				walletBody("EXPENSE", "1", TODAY.toString(), "x", companyFood, List.of())), HttpStatus.BAD_REQUEST,
 				"validation_error");
-		assertError(a.post("/api/wallet/transactions", walletBody("EXPENSE", "1", "USD", TODAY.toString(), "x",
+		assertError(a.post("/api/wallet/transactions", walletBody("EXPENSE", "1", TODAY.toString(), "x",
 				walletCategoryId(a, "Food"), List.of(bobsFile))), HttpStatus.BAD_REQUEST, "validation_error");
 	}
 
@@ -262,19 +259,19 @@ class WalletIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void budgetsCountChildrenAndAlertOncePerMonth() throws Exception {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = wallet("ada@example.com");
 		String food = walletCategoryId(a, "Food");
 		a.post("/api/wallet/categories", "{\"name\":\"Restaurants\",\"icon\":\"utensils\",\"parentId\":\"" + food + "\"}");
 		String restaurants = walletCategoryId(a, "Restaurants");
 
-		assertThat(a.post("/api/wallet/budgets", "{\"currency\":\"USD\",\"limit\":\"100\",\"categoryId\":\"" + food + "\"}"))
+		assertThat(a.post("/api/wallet/budgets", "{\"limit\":\"100\",\"categoryId\":\"" + food + "\"}"))
 			.hasStatus(HttpStatus.CREATED);
-		assertError(a.post("/api/wallet/budgets", "{\"currency\":\"USD\",\"limit\":\"50\",\"categoryId\":\"" + food + "\"}"),
+		assertError(a.post("/api/wallet/budgets", "{\"limit\":\"50\",\"categoryId\":\"" + food + "\"}"),
 				HttpStatus.CONFLICT, "budget_exists");
-		assertThat(a.post("/api/wallet/budgets", "{\"currency\":\"USD\",\"limit\":\"1000\"}"))
+		assertThat(a.post("/api/wallet/budgets", "{\"limit\":\"1000\"}"))
 			.hasStatus(HttpStatus.CREATED);
-		assertError(a.post("/api/wallet/budgets", "{\"currency\":\"USD\",\"limit\":\"5\"}"), HttpStatus.CONFLICT,
+		assertError(a.post("/api/wallet/budgets", "{\"limit\":\"5\"}"), HttpStatus.CONFLICT,
 				"budget_exists");
 
 		addWallet(a, "EXPENSE", "50.00", restaurants, "Dinner");
@@ -299,10 +296,10 @@ class WalletIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void goalsAndContributionsDoNotChangeBalance() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = wallet("ada@example.com");
 		MvcTestResult goal = a.post("/api/wallet/goals",
-				"{\"name\":\" New laptop \",\"target\":\"1200\",\"currency\":\"USD\",\"deadline\":\"2027-06-30\"}");
+				"{\"name\":\" New laptop \",\"target\":\"1200\",\"deadline\":\"2027-06-30\"}");
 		assertThat(goal).hasStatus(HttpStatus.CREATED);
 		assertThat(goal).bodyJson().extractingPath("$.name").isEqualTo("New laptop");
 		String id = this.jdbc.queryForObject("SELECT id::text FROM wallet_goals", String.class);
@@ -321,7 +318,7 @@ class WalletIntegrationTests extends IntegrationTestBase {
 			.bodyJson()
 			.extractingPath("$.saved")
 			.isEqualTo("300.00");
-		assertThat(a.get("/api/wallet/dashboard")).bodyJson().extractingPath("$.balance.USD").isEqualTo("0.00");
+		assertThat(a.get("/api/wallet/dashboard")).bodyJson().extractingPath("$.balance").isEqualTo("0.00");
 		assertError(a.post("/api/wallet/goals/" + id + "/contributions", "{\"amount\":\"0\",\"date\":\"2026-11-01\"}"),
 				HttpStatus.BAD_REQUEST, "validation_error");
 		assertThat(a.delete("/api/wallet/goals/" + id)).hasStatus(HttpStatus.NO_CONTENT);
@@ -332,7 +329,7 @@ class WalletIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void recurringDueTodayIsCreatedOnceWithAlert() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = wallet("ada@example.com");
 		String bills = walletCategoryId(a, "Bills");
 		MvcTestResult created = a.post("/api/wallet/recurring", recurringBody("Rent", bills, "MONTHLY", TODAY));
@@ -348,8 +345,21 @@ class WalletIntegrationTests extends IntegrationTestBase {
 	}
 
 	@Test
+	void biweeklyRecurringIsAllowed() {
+		activeUser("ada@example.com", Role.MEMBER);
+		Client a = wallet("ada@example.com");
+		String bills = walletCategoryId(a, "Bills");
+		MvcTestResult created = a.post("/api/wallet/recurring",
+				recurringBody("Cleaner", bills, "BIWEEKLY", TODAY.plusDays(3)));
+		assertThat(created).hasStatus(HttpStatus.CREATED);
+		assertThat(created).bodyJson().extractingPath("$.unit").isEqualTo("WEEK");
+		assertThat(created).bodyJson().extractingPath("$.every").isEqualTo(2);
+		assertThat(created).bodyJson().extractingPath("$.nextDate").isEqualTo(TODAY.plusDays(3).toString());
+	}
+
+	@Test
 	void recurringJobCatchesUpAndWarnsTheDayBefore() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = wallet("ada@example.com");
 		String bills = walletCategoryId(a, "Bills");
 		a.post("/api/wallet/recurring", recurringBody("Gym", bills, "WEEKLY", TODAY.plusDays(1)));
@@ -373,7 +383,7 @@ class WalletIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void pauseAndResumeDoesNotMakeMissedDates() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = wallet("ada@example.com");
 		String bills = walletCategoryId(a, "Bills");
 		a.post("/api/wallet/recurring", recurringBody("Phone", bills, "MONTHLY", TODAY.plusDays(3)));
@@ -397,36 +407,35 @@ class WalletIntegrationTests extends IntegrationTestBase {
 	@Test
 	void monthlyOnThe31stUsesTheLastDayOfShortMonths() throws Exception {
 		var method = WalletRecurring.class.getDeclaredMethod("nextOnOrAfter", LocalDate.class, String.class,
-				LocalDate.class);
+				int.class, LocalDate.class);
 		method.setAccessible(true);
 		LocalDate start = LocalDate.of(2026, 1, 31);
-		assertThat(method.invoke(null, start, "MONTHLY", LocalDate.of(2026, 2, 1))).isEqualTo(LocalDate.of(2026, 2, 28));
-		assertThat(method.invoke(null, start, "MONTHLY", LocalDate.of(2026, 3, 1))).isEqualTo(LocalDate.of(2026, 3, 31));
-		assertThat(method.invoke(null, start, "YEARLY", LocalDate.of(2026, 2, 1))).isEqualTo(LocalDate.of(2027, 1, 31));
-		assertThat(method.invoke(null, start, "WEEKLY", LocalDate.of(2026, 2, 1))).isEqualTo(LocalDate.of(2026, 2, 7));
-		assertThat(method.invoke(null, start, "MONTHLY", LocalDate.of(2025, 1, 1))).isEqualTo(start);
+		assertThat(method.invoke(null, start, "MONTH", 1, LocalDate.of(2026, 2, 1))).isEqualTo(LocalDate.of(2026, 2, 28));
+		assertThat(method.invoke(null, start, "MONTH", 1, LocalDate.of(2026, 3, 1))).isEqualTo(LocalDate.of(2026, 3, 31));
+		assertThat(method.invoke(null, start, "YEAR", 1, LocalDate.of(2026, 2, 1))).isEqualTo(LocalDate.of(2027, 1, 31));
+		assertThat(method.invoke(null, start, "WEEK", 1, LocalDate.of(2026, 2, 1))).isEqualTo(LocalDate.of(2026, 2, 7));
+		assertThat(method.invoke(null, start, "MONTH", 1, LocalDate.of(2025, 1, 1))).isEqualTo(start);
 	}
 
 	// ---- dashboard and alerts ----
 
 	@Test
 	void dashboardShowsBalanceMonthAndRecent() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = wallet("ada@example.com");
 		String salary = walletCategoryId(a, "Salary");
 		String food = walletCategoryId(a, "Food");
 		a.post("/api/wallet/transactions",
-				walletBody("INCOME", "2000", "USD", TODAY.minusMonths(2).toString(), "Old salary", salary, List.of()));
+				walletBody("INCOME", "2000", TODAY.minusMonths(2).toString(), "Old salary", salary, List.of()));
 		addWallet(a, "INCOME", "1000.00", salary, "Salary");
 		addWallet(a, "EXPENSE", "250.25", food, "Food");
 
 		MvcTestResult dashboard = a.get("/api/wallet/dashboard");
-		assertThat(dashboard).bodyJson().extractingPath("$.balance.USD").isEqualTo("2749.75");
-		assertThat(dashboard).bodyJson().extractingPath("$.balance.MAD").isEqualTo("0.00");
+		assertThat(dashboard).bodyJson().extractingPath("$.balance").isEqualTo("2749.75");
 		if (YearMonth.from(TODAY.minusMonths(2)).isBefore(YearMonth.from(TODAY))) {
-			assertThat(dashboard).bodyJson().extractingPath("$.thisMonth.USD.in").isEqualTo("1000.00");
+			assertThat(dashboard).bodyJson().extractingPath("$.thisMonth.in").isEqualTo("1000.00");
 		}
-		assertThat(dashboard).bodyJson().extractingPath("$.thisMonth.USD.out").isEqualTo("250.25");
+		assertThat(dashboard).bodyJson().extractingPath("$.thisMonth.out").isEqualTo("250.25");
 		assertThat(dashboard).bodyJson().extractingPath("$.recent.length()").isEqualTo(3);
 		assertThat(dashboard).bodyJson().extractingPath("$.budgets").isNotNull();
 		assertThat(dashboard).bodyJson().extractingPath("$.goals").isNotNull();
@@ -434,8 +443,8 @@ class WalletIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void alertsAreMineAndCanBeRead() {
-		User ada = activeUser("ada@example.com", Role.EMPLOYEE);
-		activeUser("bob@example.com", Role.EMPLOYEE);
+		User ada = activeUser("ada@example.com", Role.MEMBER);
+		activeUser("bob@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
 		insertAlert(ada, "one");
 		insertAlert(ada, "two");
@@ -479,7 +488,7 @@ class WalletIntegrationTests extends IntegrationTestBase {
 
 	private void addWallet(Client client, String type, String amount, String category, String description) {
 		assertThat(client.post("/api/wallet/transactions", TransactionsIntegrationTests.confirmed(
-				walletBody(type, amount, "USD", TODAY.toString(), description, category, List.of()))))
+				walletBody(type, amount, TODAY.toString(), description, category, List.of()))))
 			.hasStatus(HttpStatus.CREATED);
 	}
 
@@ -507,17 +516,17 @@ class WalletIntegrationTests extends IntegrationTestBase {
 		}
 	}
 
-	private static String walletBody(String type, String amount, String currency, String date, String description,
+	private static String walletBody(String type, String amount, String date, String description,
 			String categoryId, List<String> fileIds) {
-		return "{\"type\":\"" + type + "\",\"amount\":\"" + amount + "\",\"currency\":\"" + currency + "\",\"date\":\""
+		return "{\"type\":\"" + type + "\",\"amount\":\"" + amount + "\",\"date\":\""
 				+ date + "\",\"description\":\"" + description + "\",\"categoryId\":\"" + categoryId
-				+ "\",\"tagIds\":[],\"fileIds\":"
+				+ "\",\"fileIds\":"
 				+ fileIds.stream().map((id) -> "\"" + id + "\"").collect(Collectors.joining(",", "[", "]")) + "}";
 	}
 
 	private static String recurringBody(String name, String categoryId, String frequency, LocalDate start) {
-		return "{\"name\":\"" + name + "\",\"type\":\"EXPENSE\",\"amount\":\"500\",\"currency\":\"USD\",\"categoryId\":\""
-				+ categoryId + "\",\"description\":\"" + name + "\",\"frequency\":\"" + frequency + "\",\"startDate\":\""
+		return "{\"name\":\"" + name + "\",\"type\":\"EXPENSE\",\"amount\":\"500\",\"categoryId\":\""
+				+ categoryId + "\",\"description\":\"" + name + "\"," + repeatJson(frequency) + ",\"startDate\":\""
 				+ start + "\"}";
 	}
 

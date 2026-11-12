@@ -13,7 +13,7 @@ spring:
       ddl-auto: validate
     properties:
       hibernate:
-        # Loads lazy collections (like transaction tags) in batches, not one query per row.
+        # Loads lazy collections (like lists inside entities) in batches, not one query per row.
         default_batch_fetch_size: 100
   flyway:
     enabled: true

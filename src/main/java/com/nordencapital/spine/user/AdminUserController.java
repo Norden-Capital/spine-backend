@@ -34,9 +34,7 @@ import com.nordencapital.spine.common.ApiError;
 import com.nordencapital.spine.common.Emails;
 import com.nordencapital.spine.me.SignInDay;
 
-@Tag(name = "Admin: users", description = "OWNER and ADMIN only. ADMIN sees EMPLOYEEs and other ADMINs and manages "
-		+ "only EMPLOYEEs. OWNER sees and manages every ADMIN and EMPLOYEE. Nobody sees themself or the OWNER here. "
-		+ "A user you cannot see is 404; one you can see but not manage is 403 forbidden.")
+@Tag(name = "Admin: users", description = "OWNER only. Lists and manages every MEMBER (never the owner).")
 @RestController
 @RequestMapping("/api/admin/users")
 public class AdminUserController {
@@ -76,8 +74,7 @@ public class AdminUserController {
 	}
 
 	@Operation(summary = "Invite a user",
-			description = "Creates the user (INVITED) and emails a set-password link. ADMIN can invite EMPLOYEE; "
-					+ "OWNER can invite ADMIN or EMPLOYEE.")
+			description = "Creates a MEMBER (INVITED) and emails a set-password link. OWNER only.")
 	@ApiResponse(responseCode = "201", description = "Created")
 	@ApiResponse(responseCode = "403", description = "forbidden (role not allowed)",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
@@ -86,7 +83,7 @@ public class AdminUserController {
 	@PostMapping
 	public ResponseEntity<UserResponse> invite(@AuthenticationPrincipal AuthUser actor,
 			@Valid @RequestBody InviteRequest body) {
-		return ResponseEntity.status(HttpStatus.CREATED).body(this.service.invite(actor, body.email(), body.role()));
+		return ResponseEntity.status(HttpStatus.CREATED).body(this.service.invite(actor, body.email()));
 	}
 
 	@Operation(summary = "Send a new invite link", description = "Only for INVITED users. The old link stops working.")
@@ -152,8 +149,8 @@ public class AdminUserController {
 		this.service.sendPasswordReset(actor, id);
 	}
 
-	public record InviteRequest(@NotBlank @Email @Size(max = 320) String email,
-			@Schema(allowableValues = { "ADMIN", "EMPLOYEE" }) @NotNull Role role) {
+	/** A new user is always a MEMBER (no role to choose). */
+	public record InviteRequest(@NotBlank @Email @Size(max = 320) String email) {
 
 		// Trim and lowercase before validation, so " New@Example.com " is accepted.
 		public InviteRequest {

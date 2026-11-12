@@ -158,9 +158,10 @@ public class LogoService implements DisposableBean {
 	private boolean isUsed(String domain, User actor) {
 		Boolean used = this.jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM transactions WHERE website = ?) "
 				+ "OR EXISTS (SELECT 1 FROM categories WHERE website = ?) "
+				+ "OR EXISTS (SELECT 1 FROM company_recurring WHERE website = ?) "
 				+ "OR EXISTS (SELECT 1 FROM wallet_transactions WHERE user_id = ? AND website = ?) "
 				+ "OR EXISTS (SELECT 1 FROM wallet_categories WHERE user_id = ? AND website = ?)", Boolean.class,
-				domain, domain, actor.getId(), domain, actor.getId(), domain);
+				domain, domain, domain, actor.getId(), domain, actor.getId(), domain);
 		return Boolean.TRUE.equals(used);
 	}
 

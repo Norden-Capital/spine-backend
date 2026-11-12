@@ -13,8 +13,9 @@ import com.nordencapital.spine.transaction.TransactionResponse.UserRef;
 public record HistoryEntry(Instant at, UserRef by, String action, List<Change> changes) {
 
 	/**
-	 * One field, as display text. category, tags and files are shown by name (tags and
-	 * files as "a, b"). {@code from} is null on CREATED.
+	 * One field, as display text. category and files are shown by name (files as
+	 * "a, b"). {@code from} is null on CREATED. Old entries may still have a "tags" field
+	 * (tags were removed): shown as stored.
 	 */
 	public record Change(String field, String from, String to) {
 	}

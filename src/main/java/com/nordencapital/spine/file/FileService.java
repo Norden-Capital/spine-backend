@@ -39,7 +39,7 @@ import jakarta.servlet.http.HttpSession;
  * Who may download a file:
  * <ul>
  * <li>attached to a transaction that is not in the trash: every logged-in user;</li>
- * <li>attached to a trashed transaction: OWNER and ADMIN only;</li>
+ * <li>attached to a trashed transaction: OWNER only;</li>
  * <li>not attached yet: only the user who uploaded it;</li>
  * <li>on a private wallet transaction: only its owner, and only while the wallet is
  * unlocked (423 otherwise).</li>
@@ -186,7 +186,7 @@ public class FileService {
 		if (trashed.isEmpty()) {
 			return false;
 		}
-		return !trashed.get() || user.getRole() == Role.OWNER || user.getRole() == Role.ADMIN;
+		return !trashed.get() || user.getRole() == Role.OWNER;
 	}
 
 	/** Copies the upload to {@code target}, stopping if it is bigger than the limit. */

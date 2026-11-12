@@ -24,8 +24,13 @@ public class Category {
 	@Column(nullable = false)
 	private boolean archived;
 
-	@Column(name = "sort_order", nullable = false)
-	private int sortOrder;
+	/** 0-based order among its siblings (same parent). */
+	@Column(nullable = false)
+	private int position;
+
+	/** EXPENSE or INCOME (a subcategory has the kind of its main category). */
+	@Column(nullable = false, length = 10)
+	private String kind;
 
 	/** Bare domain like "claude.ai" (its logo is shown), or null. */
 	@Column(length = 253)
@@ -44,13 +49,14 @@ public class Category {
 	protected Category() {
 	}
 
-	static Category create(String name, String icon, UUID parentId, int sortOrder, Instant now) {
+	static Category create(String name, String icon, UUID parentId, int position, String kind, Instant now) {
 		Category category = new Category();
 		category.parentId = parentId;
 		category.id = UUID.randomUUID();
 		category.name = name;
 		category.icon = icon;
-		category.sortOrder = sortOrder;
+		category.position = position;
+		category.kind = kind;
 		category.createdAt = now;
 		category.updatedAt = now;
 		return category;
@@ -72,12 +78,26 @@ public class Category {
 		return this.archived;
 	}
 
-	public int getSortOrder() {
-		return this.sortOrder;
+	public int getPosition() {
+		return this.position;
+	}
+
+	/** Order only (no updatedAt change: renumbering siblings is not an edit of them). */
+	void setPosition(int position) {
+		this.position = position;
 	}
 
 	public UUID getParentId() {
 		return this.parentId;
+	}
+
+	public String getKind() {
+		return this.kind;
+	}
+
+	void changeKind(String kind, Instant now) {
+		this.kind = kind;
+		this.updatedAt = now;
 	}
 
 	public String getWebsite() {

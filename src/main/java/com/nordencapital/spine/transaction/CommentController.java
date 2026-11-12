@@ -56,7 +56,7 @@ public class CommentController {
 		return ResponseEntity.status(HttpStatus.CREATED).body(this.service.add(actor, id, body.text()));
 	}
 
-	@Operation(summary = "Delete a comment", description = "The author, OWNER or ADMIN.")
+	@Operation(summary = "Delete a comment", description = "The author or the OWNER.")
 	@ApiResponse(responseCode = "204", description = "Deleted")
 	@ApiResponse(responseCode = "403", description = "forbidden",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))

@@ -48,7 +48,7 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void companyWebsiteIsNormalizedLoggedAndShown() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
 
 		MvcTestResult created = a.post("/api/transactions", body(a, "https://www.Claude.ai/pricing", "Plan"));
@@ -93,7 +93,7 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void logoIsFetchedOnceAndCached() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
 		assertThat(a.post("/api/transactions", body(a, "claude.ai", "Plan"))).hasStatus(HttpStatus.CREATED);
 
@@ -116,7 +116,7 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void noLogoIsCachedAndGivesNullUrl() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
 		assertThat(a.post("/api/transactions", body(a, "nologo.example.com", "Shop"))).hasStatus(HttpStatus.CREATED);
 
@@ -134,7 +134,7 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void onlyDomainsInUseCanBeFetched() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
 		assertThat(a.get("/api/logos/claude.ai")).hasStatus(HttpStatus.NOT_FOUND);
 		assertThat(a.get("/api/logos/127.0.0.1")).hasStatus(HttpStatus.NOT_FOUND);
@@ -145,8 +145,8 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void walletWebsiteIsPrivateButWorks() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
-		activeUser("bob@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
+		activeUser("bob@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
 		assertThat(a.post("/api/wallet/pin", "{\"pin\":\"123456\"}")).hasStatus(HttpStatus.NO_CONTENT);
 		a.get("/api/wallet/categories/all");
@@ -154,9 +154,9 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 				String.class);
 
 		MvcTestResult created = a.post("/api/wallet/transactions",
-				"{\"type\":\"EXPENSE\",\"amount\":\"9\",\"currency\":\"MAD\",\"date\":\"" + TODAY
+				"{\"type\":\"EXPENSE\",\"amount\":\"9\",\"date\":\"" + TODAY
 						+ "\",\"description\":\"Coffee\",\"website\":\"WWW.Claude.AI\",\"categoryId\":\"" + food
-						+ "\",\"tagIds\":[],\"fileIds\":[]}");
+						+ "\",\"fileIds\":[]}");
 		assertThat(created).hasStatus(HttpStatus.CREATED);
 		assertThat(created).bodyJson().extractingPath("$.website").isEqualTo("claude.ai");
 		assertThat(created).bodyJson().extractingPath("$.logoUrl").isEqualTo("/api/logos/claude.ai");
@@ -174,8 +174,8 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void companyCategoryWebsiteAndLogoPickingOrder() {
-		activeUser("boss@example.com", Role.ADMIN);
-		activeUser("ada@example.com", Role.EMPLOYEE);
+		activeUser("boss@example.com", Role.OWNER);
+		activeUser("ada@example.com", Role.MEMBER);
 		Client boss = loggedIn("boss@example.com");
 		Client a = loggedIn("ada@example.com");
 
@@ -248,8 +248,8 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void walletCategoryWebsiteIsPrivate() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
-		activeUser("bob@example.com", Role.EMPLOYEE);
+		activeUser("ada@example.com", Role.MEMBER);
+		activeUser("bob@example.com", Role.MEMBER);
 		Client a = loggedIn("ada@example.com");
 		assertThat(a.post("/api/wallet/pin", "{\"pin\":\"123456\"}")).hasStatus(HttpStatus.NO_CONTENT);
 		a.get("/api/wallet/categories/all");
@@ -267,9 +267,9 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 		String cafe = this.jdbc.queryForObject("SELECT id::text FROM wallet_categories WHERE name = 'Cafe'",
 				String.class);
 
-		MvcTestResult tx = a.post("/api/wallet/transactions", "{\"type\":\"EXPENSE\",\"amount\":\"4\",\"currency\":\"MAD\","
+		MvcTestResult tx = a.post("/api/wallet/transactions", "{\"type\":\"EXPENSE\",\"amount\":\"4\","
 				+ "\"date\":\"" + TODAY + "\",\"description\":\"Latte\",\"categoryId\":\"" + cafe
-				+ "\",\"tagIds\":[],\"fileIds\":[]}");
+				+ "\",\"fileIds\":[]}");
 		assertThat(tx).hasStatus(HttpStatus.CREATED);
 		assertThat(tx).bodyJson().extractingPath("$.logoUrl").isEqualTo("/api/logos/mine.example.com");
 		assertThat(a.get("/api/wallet/categories")).bodyJson()
@@ -287,9 +287,9 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 	private String bodyIn(Client client, String website, String description, String category, String... fileIds) {
 		String file = (fileIds.length > 0) ? fileIds[0]
 				: FilesIntegrationTests.uploadedId(client.upload("proof.pdf", "application/pdf", TestFiles.PDF));
-		return "{\"type\":\"EXPENSE\",\"amount\":\"20\",\"currency\":\"USD\",\"date\":\"" + TODAY
+		return "{\"type\":\"EXPENSE\",\"amount\":\"20\",\"date\":\"" + TODAY
 				+ "\",\"description\":\"" + description + "\",\"website\":\"" + website + "\",\"categoryId\":\""
-				+ category + "\",\"tagIds\":[],\"fileIds\":[\"" + file + "\"],\"confirmDuplicate\":true}";
+				+ category + "\",\"fileIds\":[\"" + file + "\"],\"confirmDuplicate\":true}";
 	}
 
 	private String body(Client client, String website, String description, String... fileIds) {
@@ -297,9 +297,9 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 				: FilesIntegrationTests.uploadedId(client.upload("proof.pdf", "application/pdf", TestFiles.PDF));
 		String category = this.jdbc.queryForObject("SELECT id::text FROM categories WHERE name = 'Food'",
 				String.class);
-		return "{\"type\":\"EXPENSE\",\"amount\":\"20\",\"currency\":\"USD\",\"date\":\"" + TODAY
+		return "{\"type\":\"EXPENSE\",\"amount\":\"20\",\"date\":\"" + TODAY
 				+ "\",\"description\":\"" + description + "\",\"website\":\"" + website + "\",\"categoryId\":\""
-				+ category + "\",\"tagIds\":[],\"fileIds\":[\"" + file + "\"],\"confirmDuplicate\":true}";
+				+ category + "\",\"fileIds\":[\"" + file + "\"],\"confirmDuplicate\":true}";
 	}
 
 	/** Returns the logos it was given; counts calls per domain. */

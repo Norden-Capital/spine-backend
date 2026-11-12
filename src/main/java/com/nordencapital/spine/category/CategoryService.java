@@ -21,6 +21,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.nordencapital.spine.auth.AuthUser;
 import com.nordencapital.spine.common.ApiException;
+import com.nordencapital.spine.common.CategoryKinds;
 import com.nordencapital.spine.common.Websites;
 import com.nordencapital.spine.logo.LogoService;
 import com.nordencapital.spine.common.CategoryTree;
@@ -29,7 +30,7 @@ import com.nordencapital.spine.user.Actors;
 
 /**
  * Expense categories. Everyone reads the active ones (most used first); only managers
- * (OWNER, ADMIN) create, change, archive and unarchive. Nothing is ever deleted.
+ * (OWNER) creates, changes, archives and unarchives. Nothing is ever deleted.
  * Subcategories: one level only; an archived parent hides its children from pickers.
  */
 @Service
@@ -37,11 +38,6 @@ public class CategoryService {
 
 	/** Usage counts look at transactions dated in the last this many days. */
 	public static final int USAGE_DAYS = 90;
-
-	/** The seeded "Other" has this sort order; new categories get one just below it. */
-	static final int LAST_SORT_ORDER = 1000;
-
-	private static final int SORT_STEP = 10;
 
 	private final CategoryRepository categories;
 
@@ -67,16 +63,19 @@ public class CategoryService {
 	 * {@value #USAGE_DAYS} days first, then by name.
 	 */
 	@Transactional(readOnly = true)
-	public List<CategoryPick> active(AuthUser principal) {
+	public List<CategoryPick> active(AuthUser principal, String kind) {
 		this.actors.active(principal);
+		String onlyKind = CategoryKinds.parse("kind", kind);
 		List<Category> all = this.categories.findAll();
 		Map<UUID, Category> byId = all.stream().collect(Collectors.toMap(Category::getId, Function.identity()));
 		Map<UUID, Long> usage = usage();
 		Map<String, String> logoUrls = logoUrls(all);
 		return all.stream()
 			.filter((category) -> isPickable(category, byId))
-			.map((category) -> new CategoryPick(category.getId(), category.getName(), category.getIcon(), false,
-					category.getParentId(), category.getWebsite(), logoUrls.get(category.getWebsite()),
+			.filter((category) -> onlyKind == null || onlyKind.equals(category.getKind()))
+			.map((category) -> new CategoryPick(category.getId(), category.getName(), category.getIcon(),
+					category.getKind(), false,
+					category.getParentId(), category.getPosition(), category.getWebsite(), logoUrls.get(category.getWebsite()),
 					usage.getOrDefault(category.getId(), 0L)))
 			.sorted(Comparator.comparingLong(CategoryPick::usageCount)
 				.reversed()
@@ -84,11 +83,23 @@ public class CategoryService {
 			.toList();
 	}
 
-	/** All categories, archived too (managers only), by name. */
+	/**
+	 * All categories, archived too (managers only), in manage-page order: each main
+	 * category by position, followed by its subcategories by position.
+	 */
 	@Transactional(readOnly = true)
-	public List<CategoryResponse> all(AuthUser principal) {
-		this.actors.manager(principal);
-		List<Category> all = this.categories.findAllByOrderByNameAsc();
+	public List<CategoryResponse> all(AuthUser principal, String kind) {
+		this.actors.owner(principal);
+		return allOrdered(CategoryKinds.parse("kind", kind));
+	}
+
+	private List<CategoryResponse> allOrdered(String onlyKind) {
+		List<Category> all = CategoryTree
+			.ordered(this.categories.findAll(), Category::getId, Category::getParentId, Category::getPosition,
+					Category::getName)
+			.stream()
+			.filter((category) -> onlyKind == null || onlyKind.equals(category.getKind()))
+			.toList();
 		Map<String, String> logoUrls = logoUrls(all);
 		return all.stream().map((category) -> CategoryResponse.from(category, logoUrls)).toList();
 	}
@@ -99,17 +110,25 @@ public class CategoryService {
 	 * parent)
 	 */
 	@Transactional
-	public CategoryResponse create(AuthUser principal, String name, String icon, UUID parentId, String website) {
-		this.actors.manager(principal);
+	public CategoryResponse create(AuthUser principal, String name, String icon, UUID parentId, String website,
+			String kind) {
+		this.actors.owner(principal);
 		CategoryIcons.check(icon);
 		String domain = Websites.normalize(website);
+		String wanted = CategoryKinds.parse("kind", kind);
 		CategoryTree.checkParent(null, parentId, false, this::node);
+		String finalKind = (wanted != null) ? wanted : CategoryKinds.EXPENSE;
+		if (parentId != null) {
+			finalKind = find(parentId).getKind();
+			if (wanted != null && !wanted.equals(finalKind)) {
+				throw CategoryKinds.subKind();
+			}
+		}
 		if (this.categories.findByNameIgnoreCase(name).isPresent()) {
 			throw nameTaken();
 		}
-		Integer max = this.categories.maxSortOrderBelow(LAST_SORT_ORDER);
-		int sortOrder = Math.min(((max != null) ? max : 0) + SORT_STEP, LAST_SORT_ORDER - 1);
-		Category category = Category.create(name, icon, parentId, sortOrder, this.clock.instant());
+		Category category = Category.create(name, icon, parentId, endOf(parentId, null), finalKind,
+				this.clock.instant());
 		if (domain != null) {
 			category.changeWebsite(domain, this.clock.instant());
 		}
@@ -123,9 +142,10 @@ public class CategoryService {
 	 */
 	@Transactional
 	public CategoryResponse update(AuthUser principal, UUID id, String name, String icon, ParentPatch parent,
-			Websites.Patch website) {
-		this.actors.manager(principal);
+			Websites.Patch website, String kind) {
+		this.actors.owner(principal);
 		Category category = find(id);
+		String wanted = CategoryKinds.parse("kind", kind);
 		if (name != null) {
 			boolean takenByOther = this.categories.findByNameIgnoreCase(name)
 				.filter((other) -> !other.getId().equals(id))
@@ -141,12 +161,97 @@ public class CategoryService {
 		}
 		if (parent.given()) {
 			CategoryTree.checkParent(id, parent.parentId(), this.categories.existsByParentId(id), this::node);
-			category.moveTo(parent.parentId(), this.clock.instant());
+			if (parent.parentId() != null) {
+				CategoryKinds.checkParent(find(parent.parentId()).getKind(),
+						(wanted != null) ? wanted : category.getKind());
+			}
+			if (!java.util.Objects.equals(parent.parentId(), category.getParentId())) {
+				UUID oldParent = category.getParentId();
+				category.setPosition(endOf(parent.parentId(), id));
+				category.moveTo(parent.parentId(), this.clock.instant());
+				renumber(oldParent, id);
+			}
 		}
 		if (website.given() && !java.util.Objects.equals(website.domain(), category.getWebsite())) {
 			category.changeWebsite(website.domain(), this.clock.instant());
 		}
+		if (wanted != null && !wanted.equals(category.getKind())) {
+			if (category.getParentId() != null) {
+				throw CategoryKinds.subKind();
+			}
+			// A main category changes kind: its subcategories follow. Old transactions keep it.
+			category.changeKind(wanted, this.clock.instant());
+			this.categories.findAll()
+				.stream()
+				.filter((c) -> id.equals(c.getParentId()))
+				.forEach((c) -> c.changeKind(wanted, this.clock.instant()));
+		}
 		return response(saveFlush(category));
+	}
+
+	/**
+	 * Drag and drop: puts the category under {@code parentId} (null = main category) at
+	 * {@code position} (0-based among its new siblings; too big = last) and renumbers the
+	 * siblings. Archived categories can be moved too. Not written to any history.
+	 * @return all categories in manage-page order
+	 * @throws ApiException 404 {@code category_not_found}, 400 {@code validation_error}
+	 * (own parent, under a subcategory, or it has subcategories)
+	 */
+	@Transactional
+	public List<CategoryResponse> move(AuthUser principal, UUID id, UUID parentId, int position) {
+		this.actors.owner(principal);
+		this.jdbc.queryForList("SELECT id FROM categories FOR UPDATE", UUID.class);
+		Category category = find(id);
+		CategoryTree.checkParent(id, parentId, this.categories.existsByParentId(id), true, this::node);
+		if (parentId != null) {
+			CategoryKinds.checkParent(find(parentId).getKind(), category.getKind());
+		}
+		UUID oldParent = category.getParentId();
+		List<Category> all = this.categories.findAll();
+		List<UUID> order = CategoryTree.insertAt(siblingIds(all, parentId, id), id, position);
+		Map<UUID, Category> byId = all.stream().collect(Collectors.toMap(Category::getId, Function.identity()));
+		for (int i = 0; i < order.size(); i++) {
+			byId.get(order.get(i)).setPosition(i);
+		}
+		if (!java.util.Objects.equals(oldParent, parentId)) {
+			category.moveTo(parentId, this.clock.instant());
+			List<UUID> old = siblingIds(all, oldParent, id);
+			for (int i = 0; i < old.size(); i++) {
+				byId.get(old.get(i)).setPosition(i);
+			}
+		}
+		this.categories.flush();
+		return allOrdered(null);
+	}
+
+	/** Ids of the categories under {@code parentId} (without {@code except}), in order. */
+	private static List<UUID> siblingIds(List<Category> all, UUID parentId, UUID except) {
+		return all.stream()
+			.filter((c) -> java.util.Objects.equals(c.getParentId(), parentId) && !c.getId().equals(except))
+			.sorted(Comparator.comparingInt(Category::getPosition)
+				.thenComparing(Category::getName, String.CASE_INSENSITIVE_ORDER))
+			.map(Category::getId)
+			.toList();
+	}
+
+	/** Position after the last sibling under {@code parentId}. */
+	private int endOf(UUID parentId, UUID except) {
+		return this.categories.findAll()
+			.stream()
+			.filter((c) -> java.util.Objects.equals(c.getParentId(), parentId) && !c.getId().equals(except))
+			.mapToInt((c) -> c.getPosition() + 1)
+			.max()
+			.orElse(0);
+	}
+
+	/** Closes the gap left in the old group after a category moved out of it. */
+	private void renumber(UUID parentId, UUID movedId) {
+		List<Category> all = this.categories.findAll();
+		Map<UUID, Category> byId = all.stream().collect(Collectors.toMap(Category::getId, Function.identity()));
+		List<UUID> ids = siblingIds(all, parentId, movedId);
+		for (int i = 0; i < ids.size(); i++) {
+			byId.get(ids.get(i)).setPosition(i);
+		}
 	}
 
 	/**
@@ -155,7 +260,7 @@ public class CategoryService {
 	 */
 	@Transactional
 	public CategoryResponse setArchived(AuthUser principal, UUID id, boolean archived) {
-		this.actors.manager(principal);
+		this.actors.owner(principal);
 		Category category = find(id);
 		if (category.isArchived() != archived) {
 			category.setArchived(archived, this.clock.instant());

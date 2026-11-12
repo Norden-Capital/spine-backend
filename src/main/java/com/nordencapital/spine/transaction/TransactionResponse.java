@@ -14,21 +14,23 @@ import com.nordencapital.spine.file.FileResponse;
  * category icon
  * @param updatedBy null if never changed
  * @param updatedAt null if never changed
- * @param canDelete true if the caller may move it to the trash (its creator, OWNER,
- * ADMIN)
+ * @param canEdit true if the caller may change it and its proof files (the person who
+ * added it, or the OWNER)
+ * @param canDelete true if the caller may move it to the trash (same rule)
  */
-public record TransactionResponse(UUID id, String type, String amount, String currency, LocalDate date,
-		String description, String website, String logoUrl, CategoryRef category, List<TagRef> tags, List<FileResponse> files, UserRef createdBy,
-		Instant createdAt, UserRef updatedBy, Instant updatedAt, boolean canDelete) {
+public record TransactionResponse(UUID id, String type, String amount, LocalDate date,
+		String description, String website, String logoUrl, CategoryRef category, List<FileResponse> files, UserRef createdBy,
+		Instant createdAt, UserRef updatedBy, Instant updatedAt, boolean canEdit, boolean canDelete) {
 
-	public record CategoryRef(UUID id, String name, String icon, boolean archived, UUID parentId) {
+	/** @param kind EXPENSE or INCOME */
+	public record CategoryRef(UUID id, String name, String icon, boolean archived, UUID parentId, String kind) {
 	}
 
-	public record TagRef(UUID id, String name) {
-	}
-
-	/** A user shown by name ("First Last", or the email). */
-	public record UserRef(UUID id, String name) {
+	/**
+	 * A user shown by name ("First Last", or the email) and face.
+	 * @param avatarSeed DiceBear seed (never null)
+	 */
+	public record UserRef(UUID id, String name, String avatarSeed) {
 	}
 
 }

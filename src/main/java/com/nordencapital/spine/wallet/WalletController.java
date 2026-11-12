@@ -40,7 +40,7 @@ import com.nordencapital.spine.transaction.TransactionRequest;
 import com.nordencapital.spine.user.User;
 
 /**
- * The private wallet. Strictly mine: OWNER and ADMIN have no access, and other users'
+ * The private wallet. Strictly mine: even the OWNER has no access, and other users'
  * items are "not found". Everything except status, PIN and unlock needs the wallet to
  * be unlocked in this session (423 {@code wallet_locked}). See docs/api-module5.md (G).
  */
@@ -53,8 +53,6 @@ public class WalletController {
 
 	private final WalletCategories categories;
 
-	private final WalletTags tags;
-
 	private final WalletTransactions transactions;
 
 	private final WalletBudgets budgets;
@@ -63,11 +61,10 @@ public class WalletController {
 
 	private final WalletRecurring recurring;
 
-	public WalletController(WalletLock lock, WalletCategories categories, WalletTags tags,
+	public WalletController(WalletLock lock, WalletCategories categories,
 			WalletTransactions transactions, WalletBudgets budgets, WalletGoals goals, WalletRecurring recurring) {
 		this.lock = lock;
 		this.categories = categories;
-		this.tags = tags;
 		this.transactions = transactions;
 		this.budgets = budgets;
 		this.goals = goals;
@@ -118,7 +115,7 @@ public class WalletController {
 	// ---- dashboard ----
 
 	@Operation(summary = "Wallet dashboard",
-			description = "Balance (all time, per currency), this month, budgets, goals, 5 latest transactions.")
+			description = "Balance (all time), this month in/out/net, budgets, goals, 5 latest transactions.")
 	@GetMapping("/api/wallet/dashboard")
 	public Dashboard dashboard(@AuthenticationPrincipal AuthUser actor, HttpServletRequest request) {
 		User user = me(actor, request);
@@ -132,15 +129,17 @@ public class WalletController {
 
 	@Operation(summary = "My categories for a picker", description = "Most used in 90 days first, then by name.")
 	@GetMapping("/api/wallet/categories")
-	public List<WalletCategories.Pick> categories(@AuthenticationPrincipal AuthUser actor, HttpServletRequest request) {
-		return this.categories.picker(me(actor, request).getId());
+	public List<WalletCategories.Pick> categories(@AuthenticationPrincipal AuthUser actor,
+			@RequestParam(required = false) String kind, HttpServletRequest request) {
+		return this.categories.picker(me(actor, request).getId(), kind);
 	}
 
-	@Operation(summary = "All my categories, archived too")
+	@Operation(summary = "All my categories, archived too",
+			description = "Manage-page order: each main category by position, then its subcategories by position.")
 	@GetMapping("/api/wallet/categories/all")
 	public List<WalletCategories.Pick> allCategories(@AuthenticationPrincipal AuthUser actor,
-			HttpServletRequest request) {
-		return this.categories.allPicks(me(actor, request).getId());
+			@RequestParam(required = false) String kind, HttpServletRequest request) {
+		return this.categories.allPicks(me(actor, request).getId(), kind);
 	}
 
 	@Operation(summary = "Add a category", description = "409 name_taken.")
@@ -149,7 +148,7 @@ public class WalletController {
 			@Valid @RequestBody CategoryRequest body, HttpServletRequest request) {
 		return ResponseEntity.status(HttpStatus.CREATED)
 			.body(this.categories.create(me(actor, request).getId(), body.name(), body.icon(), body.parentId(),
-					body.website()));
+					body.website(), body.kind()));
 	}
 
 	@Operation(summary = "Change a category",
@@ -159,7 +158,17 @@ public class WalletController {
 	public WalletCategories.Pick updateCategory(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody CategoryUpdate body, HttpServletRequest request) {
 		return this.categories.update(me(actor, request).getId(), id, body.name(), body.icon(),
-				ParentPatch.of(body.parentId()), Websites.patch(body.website()));
+				ParentPatch.of(body.parentId()), Websites.patch(body.website()), body.kind());
+	}
+
+	@Operation(summary = "Move one of my categories (drag and drop)",
+			description = "Same as PATCH /api/admin/categories/{id}/move, for my wallet. Returns ALL my categories in "
+					+ "manage-page order.")
+	@PatchMapping("/api/wallet/categories/{id}/move")
+	public List<WalletCategories.Pick> moveCategory(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
+			@Valid @RequestBody com.nordencapital.spine.category.CategoryController.MoveRequest body,
+			HttpServletRequest request) {
+		return this.categories.move(me(actor, request).getId(), id, body.parentId(), body.position());
 	}
 
 	@PostMapping("/api/wallet/categories/{id}/archive")
@@ -174,46 +183,6 @@ public class WalletController {
 		return this.categories.setArchived(me(actor, request).getId(), id, false);
 	}
 
-	// ---- tags ----
-
-	@Operation(summary = "My tags for a picker", description = "Most used in 90 days first, then by name, max 50.")
-	@GetMapping("/api/wallet/tags")
-	public List<WalletTags.Pick> tags(@AuthenticationPrincipal AuthUser actor,
-			@RequestParam(required = false) String q, HttpServletRequest request) {
-		return this.tags.search(me(actor, request).getId(), q);
-	}
-
-	@GetMapping("/api/wallet/tags/all")
-	public List<WalletTags.Pick> allTags(@AuthenticationPrincipal AuthUser actor, HttpServletRequest request) {
-		return this.tags.all(me(actor, request).getId());
-	}
-
-	@Operation(summary = "Add a tag", description = "201 new, 200 existing active, 409 tag_archived.")
-	@PostMapping("/api/wallet/tags")
-	public ResponseEntity<WalletTags.Pick> createTag(@AuthenticationPrincipal AuthUser actor,
-			@Valid @RequestBody NameRequest body, HttpServletRequest request) {
-		WalletTags.Created created = this.tags.create(me(actor, request).getId(), body.name());
-		return ResponseEntity.status(created.created() ? HttpStatus.CREATED : HttpStatus.OK).body(created.tag());
-	}
-
-	@PatchMapping("/api/wallet/tags/{id}")
-	public WalletTags.Pick renameTag(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
-			@Valid @RequestBody NameRequest body, HttpServletRequest request) {
-		return this.tags.rename(me(actor, request).getId(), id, body.name());
-	}
-
-	@PostMapping("/api/wallet/tags/{id}/archive")
-	public WalletTags.Pick archiveTag(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
-			HttpServletRequest request) {
-		return this.tags.setArchived(me(actor, request).getId(), id, true);
-	}
-
-	@PostMapping("/api/wallet/tags/{id}/unarchive")
-	public WalletTags.Pick unarchiveTag(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
-			HttpServletRequest request) {
-		return this.tags.setArchived(me(actor, request).getId(), id, false);
-	}
-
 	// ---- transactions ----
 
 	@Operation(summary = "Search my wallet transactions", description = "Same filters and paging as company list "
@@ -223,12 +192,12 @@ public class WalletController {
 			@RequestParam(required = false) String from, @RequestParam(required = false) String to,
 			@RequestParam(required = false) String month, @RequestParam(required = false) String q,
 			@RequestParam(required = false) List<String> categoryIds,
-			@RequestParam(required = false) List<String> tagIds, @RequestParam(required = false) String type,
-			@RequestParam(required = false) String currency, @RequestParam(required = false) String minAmount,
+			@RequestParam(required = false) String type,
+			@RequestParam(required = false) String minAmount,
 			@RequestParam(required = false) String maxAmount, @RequestParam(required = false) String page,
 			@RequestParam(required = false) String size, HttpServletRequest request) {
-		return this.transactions.list(me(actor, request), new ListFilter.Params(from, to, month, q, categoryIds, tagIds,
-				type, currency, null, minAmount, maxAmount, page, size));
+		return this.transactions.list(me(actor, request), new ListFilter.Params(from, to, month, q, categoryIds,
+				type, null, minAmount, maxAmount, page, size));
 	}
 
 	@GetMapping("/api/wallet/transactions/{id}")
@@ -267,7 +236,7 @@ public class WalletController {
 		return this.budgets.list(me(actor, request).getId());
 	}
 
-	@Operation(summary = "Add a monthly budget", description = "No categoryId = total for the currency. "
+	@Operation(summary = "Add a monthly budget", description = "No categoryId = total budget. "
 			+ "409 budget_exists.")
 	@PostMapping("/api/wallet/budgets")
 	public ResponseEntity<WalletBudgets.Budget> createBudget(@AuthenticationPrincipal AuthUser actor,
@@ -363,7 +332,31 @@ public class WalletController {
 		return this.recurring.setActive(me(actor, request).getId(), id, false);
 	}
 
-	@Operation(summary = "Resume", description = "Missed dates are not made; nextDate = next on or after today.")
+	@Operation(summary = "Pause until a date", description = "Nothing is made before that date; then it goes on "
+			+ "by itself. Resume ends it early. Body: {\"date\": \"2026-12-01\"} (after today).")
+	@PostMapping("/api/wallet/recurring/{id}/pause-until")
+	public WalletRecurring.Recurring pauseRecurringUntil(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
+			@Valid @RequestBody com.nordencapital.spine.common.Recurrence.DateRequest body, HttpServletRequest request) {
+		return this.recurring.pauseUntil(me(actor, request).getId(), id, body.date());
+	}
+
+	@Operation(summary = "Skip one date", description = "That transaction is not made; the next ones are normal. "
+			+ "Body: {\"date\": \"2026-12-01\"} (a date of the series, today or later). 409 already_created.")
+	@PostMapping("/api/wallet/recurring/{id}/skips")
+	public WalletRecurring.Recurring skipRecurring(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
+			@Valid @RequestBody com.nordencapital.spine.common.Recurrence.DateRequest body, HttpServletRequest request) {
+		return this.recurring.skip(me(actor, request).getId(), id, body.date());
+	}
+
+	@Operation(summary = "Undo a skip", description = "Only before its date (409 too_late).")
+	@DeleteMapping("/api/wallet/recurring/{id}/skips/{date}")
+	public WalletRecurring.Recurring unskipRecurring(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
+			@PathVariable String date, HttpServletRequest request) {
+		return this.recurring.unskip(me(actor, request).getId(), id, date);
+	}
+
+	@Operation(summary = "Resume", description = "Ends a pause (with or without a date). Missed dates are "
+			+ "not made; nextDate = next on or after today.")
 	@PostMapping("/api/wallet/recurring/{id}/resume")
 	public WalletRecurring.Recurring resume(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			HttpServletRequest request) {
@@ -384,22 +377,14 @@ public class WalletController {
 	}
 
 	/** The name is trimmed before validation. */
-	public record NameRequest(@NotBlank @Size(max = Names.MAX_LENGTH) @Pattern(regexp = Names.NO_CONTROL_CHARS,
-			message = "must not contain control characters") String name) {
-
-		public NameRequest {
-			name = Names.clean(name);
-		}
-
-	}
-
-	/** The name is trimmed before validation. */
 	public record CategoryRequest(
 			@NotBlank @Size(max = Names.MAX_LENGTH) @Pattern(regexp = Names.NO_CONTROL_CHARS,
 					message = "must not contain control characters") String name,
 			@NotNull String icon, UUID parentId,
 			@Schema(nullable = true, description = "Optional website (logo), e.g. \"claude.ai\"")
-			@Size(max = Websites.MAX_INPUT) String website) {
+			@Size(max = Websites.MAX_INPUT) String website,
+			@Schema(nullable = true, allowableValues = { "EXPENSE", "INCOME" },
+					description = "Main: default EXPENSE. Sub: its main's kind") String kind) {
 
 		public CategoryRequest {
 			name = Names.clean(name);
@@ -413,7 +398,9 @@ public class WalletController {
 					message = "must not contain control characters") String name,
 			String icon, @Schema(type = "string", format = "uuid", nullable = true) JsonNode parentId,
 			@Schema(type = "string", nullable = true, description = "Leave out = keep; null or \"\" = remove")
-			JsonNode website) {
+			JsonNode website,
+			@Schema(nullable = true, allowableValues = { "EXPENSE", "INCOME" },
+					description = "Main categories only (subs follow). Leave out = keep") String kind) {
 
 		public CategoryUpdate {
 			name = Names.clean(name);
@@ -422,10 +409,10 @@ public class WalletController {
 	}
 
 	/**
-	 * @param balance all-time INCOME - EXPENSE per currency
-	 * @param thisMonth this month in/out/net per currency
+	 * @param balance all-time INCOME - EXPENSE
+	 * @param thisMonth this month in/out/net
 	 */
-	public record Dashboard(Map<String, String> balance, Map<String, Totals> thisMonth,
+	public record Dashboard(String balance, Totals thisMonth,
 			List<WalletBudgets.Budget> budgets, List<WalletGoals.Goal> goals, List<WalletTransactions.WalletTx> recent) {
 	}
 

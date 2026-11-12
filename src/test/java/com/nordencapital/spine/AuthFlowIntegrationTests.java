@@ -25,7 +25,7 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 	void flywayRanAllMigrations() {
 		assertThat(this.jdbc.queryForList("SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank",
 				String.class))
-			.containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16");
+			.containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26");
 	}
 
 	@Test
@@ -37,14 +37,14 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void loginStartsServerSideSession() {
-		User user = activeUser("emp@example.com", Role.EMPLOYEE);
+		User user = activeUser("emp@example.com", Role.MEMBER);
 		Client client = client();
 
 		MvcTestResult login = client.login("emp@example.com", PASSWORD);
 		assertThat(login).hasStatus(HttpStatus.OK);
 		assertThat(login).bodyJson().extractingPath("$.id").isEqualTo(user.getId().toString());
 		assertThat(login).bodyJson().extractingPath("$.email").isEqualTo("emp@example.com");
-		assertThat(login).bodyJson().extractingPath("$.role").isEqualTo("EMPLOYEE");
+		assertThat(login).bodyJson().extractingPath("$.role").isEqualTo("MEMBER");
 
 		String setCookie = String.join("\n", login.getResponse().getHeaders("Set-Cookie"));
 		assertThat(setCookie).contains("SESSION=").contains("HttpOnly").contains("SameSite=Lax").contains("Path=/");
@@ -59,15 +59,15 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void loginIgnoresEmailCaseAndSpaces() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		assertThat(client().login("  Emp@Example.COM ", PASSWORD)).hasStatus(HttpStatus.OK);
 	}
 
 	@Test
 	void loginErrorIsTheSameForEveryKindOfBadLogin() {
-		activeUser("active@example.com", Role.EMPLOYEE);
-		invitedUser("invited@example.com", Role.EMPLOYEE);
-		disabledUser("disabled@example.com", Role.EMPLOYEE);
+		activeUser("active@example.com", Role.MEMBER);
+		invitedUser("invited@example.com", Role.MEMBER);
+		disabledUser("disabled@example.com", Role.MEMBER);
 
 		List<MvcTestResult> results = List.of(client().login("active@example.com", "wrong-password-123"),
 				client().login("nobody@example.com", PASSWORD), client().login("invited@example.com", PASSWORD),
@@ -81,7 +81,7 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void loginIsBlockedAfterFiveFailures() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		Client client = client();
 		for (int i = 0; i < 5; i++) {
 			assertThat(client.login("emp@example.com", "wrong-password-123")).hasStatus(HttpStatus.UNAUTHORIZED);
@@ -95,7 +95,7 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void logoutDeletesSession() {
-		User user = activeUser("emp@example.com", Role.EMPLOYEE);
+		User user = activeUser("emp@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 		assertThat(client.post("/api/auth/logout", "")).hasStatus(HttpStatus.NO_CONTENT);
 		assertThat(client.get("/api/auth/me")).hasStatus(HttpStatus.UNAUTHORIZED);
@@ -104,7 +104,7 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void stolenOldSessionCookieStopsWorkingAfterLogout() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 		String sessionCookie = client.cookie("SESSION");
 		client.post("/api/auth/logout", "");
@@ -118,9 +118,9 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void forgotPasswordAlwaysReturns202ButOnlyMailsActiveUsers() {
-		activeUser("active@example.com", Role.EMPLOYEE);
-		invitedUser("invited@example.com", Role.EMPLOYEE);
-		disabledUser("disabled@example.com", Role.EMPLOYEE);
+		activeUser("active@example.com", Role.MEMBER);
+		invitedUser("invited@example.com", Role.MEMBER);
+		disabledUser("disabled@example.com", Role.MEMBER);
 
 		for (String email : List.of("active@example.com", "invited@example.com", "disabled@example.com",
 				"nobody@example.com")) {
@@ -132,7 +132,7 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void forgotPasswordIsLimitedButStillReturns202() {
-		activeUser("active@example.com", Role.EMPLOYEE);
+		activeUser("active@example.com", Role.MEMBER);
 		Client client = client();
 		for (int i = 0; i < 5; i++) {
 			assertThat(client.post("/api/auth/forgot-password", "{\"email\":\"active@example.com\"}"))
@@ -143,7 +143,7 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void resetPasswordFlow() {
-		User user = activeUser("emp@example.com", Role.EMPLOYEE);
+		User user = activeUser("emp@example.com", Role.MEMBER);
 		client().post("/api/auth/forgot-password", "{\"email\":\"emp@example.com\"}");
 		String token = tokenFromLastMailTo("emp@example.com");
 
@@ -174,7 +174,7 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void passwordResetLogsOutOtherSessions() {
-		User user = activeUser("emp@example.com", Role.EMPLOYEE);
+		User user = activeUser("emp@example.com", Role.MEMBER);
 		Client oldBrowser = loggedIn("emp@example.com");
 		String token = this.tokens.issue(user, TokenPurpose.RESET);
 
@@ -187,7 +187,7 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void inviteFlowActivatesUserWithoutLoggingIn() {
-		User user = invitedUser("new@example.com", Role.EMPLOYEE);
+		User user = invitedUser("new@example.com", Role.MEMBER);
 		String token = this.tokens.issue(user, TokenPurpose.INVITE);
 
 		assertThat(client().get("/api/auth/token/" + token)).hasStatus(HttpStatus.OK)
@@ -212,7 +212,7 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void expiredTokenIsInvalid() {
-		User user = invitedUser("new@example.com", Role.EMPLOYEE);
+		User user = invitedUser("new@example.com", Role.MEMBER);
 		String token = this.tokens.issue(user, TokenPurpose.INVITE);
 		expireAllTokens();
 
@@ -224,7 +224,7 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void newTokenMakesOlderOneInvalid() {
-		User user = invitedUser("new@example.com", Role.EMPLOYEE);
+		User user = invitedUser("new@example.com", Role.MEMBER);
 		String first = this.tokens.issue(user, TokenPurpose.INVITE);
 		String second = this.tokens.issue(user, TokenPurpose.INVITE);
 
@@ -234,7 +234,7 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void tokenOnlyStoredAsHash() {
-		User user = invitedUser("new@example.com", Role.EMPLOYEE);
+		User user = invitedUser("new@example.com", Role.MEMBER);
 		String token = this.tokens.issue(user, TokenPurpose.INVITE);
 		String stored = this.jdbc.queryForObject("SELECT token_hash FROM auth_tokens WHERE user_id = ?", String.class,
 				user.getId());
@@ -251,7 +251,7 @@ class AuthFlowIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void inviteTokenStopsWorkingWhenUserIsDisabled() {
-		User user = invitedUser("new@example.com", Role.EMPLOYEE);
+		User user = invitedUser("new@example.com", Role.MEMBER);
 		String token = this.tokens.issue(user, TokenPurpose.INVITE);
 		this.transaction.executeWithoutResult((status) -> {
 			User managed = this.users.findById(user.getId()).orElseThrow();

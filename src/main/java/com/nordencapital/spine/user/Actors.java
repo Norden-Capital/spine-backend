@@ -29,13 +29,13 @@ public class Actors {
 	}
 
 	/**
-	 * A "manager" is an ACTIVE OWNER or ADMIN.
+	 * The ACTIVE OWNER.
 	 * @throws ApiException 403 {@code forbidden} otherwise
 	 */
-	public User manager(AuthUser principal) {
+	public User owner(AuthUser principal) {
 		return this.users.findById(principal.id())
 			.filter((user) -> user.getStatus() == UserStatus.ACTIVE)
-			.filter((user) -> user.getRole() == Role.OWNER || user.getRole() == Role.ADMIN)
+			.filter((user) -> user.getRole() == Role.OWNER)
 			.orElseThrow(() -> new ApiException(HttpStatus.FORBIDDEN, "forbidden", "You cannot do this"));
 	}
 

@@ -5,6 +5,7 @@ import java.util.UUID;
 /**
  * A category in a picker, with how often it was used in the last 90 days.
  */
-public record CategoryPick(UUID id, String name, String icon, boolean archived, UUID parentId, String website,
+public record CategoryPick(UUID id, String name, String icon, String kind, boolean archived, UUID parentId, int position,
+		String website,
 		String logoUrl, long usageCount) {
 }

@@ -20,25 +20,23 @@ import com.nordencapital.spine.common.Websites;
 public record TransactionRequest(
 		@Schema(allowableValues = { "EXPENSE", "INCOME" }) @NotNull
 		@Pattern(regexp = "EXPENSE|INCOME", message = "must be EXPENSE or INCOME") String type,
-		@Schema(description = "Money as text, max 2 decimals, e.g. \"123.45\"", example = "123.45") @NotNull
+		@Schema(description = "USD as text, max 2 decimals, e.g. \"123.45\"", example = "123.45") @NotNull
 		@Pattern(regexp = "(0|[1-9][0-9]{0,9})(\\.[0-9]{1,2})?",
 				message = "must be an amount like 123.45 (max 2 decimals)") String amount,
-		@Schema(allowableValues = { "USD", "MAD" }) @NotNull
-		@Pattern(regexp = "USD|MAD", message = "must be USD or MAD") String currency,
 		@Schema(description = "YYYY-MM-DD, not in the future", example = "2026-03-31") @NotNull
 		@Pattern(regexp = "[0-9]{4}-[0-9]{2}-[0-9]{2}", message = "must be like 2026-03-31") String date,
 		@NotBlank @Size(max = 200) @Pattern(regexp = Names.NO_CONTROL_CHARS,
 				message = "must not contain control characters") String description,
 		@Schema(description = "An active category (an archived one can stay on an old transaction)") @NotNull
 		UUID categoryId,
-		@Schema(description = "0 to 10 active tags (archived ones already on it can stay)", nullable = true)
-		@Size(max = TransactionService.MAX_TAGS) List<UUID> tagIds,
 		@Schema(description = "1 to 5 proof files: your new uploads, or files already on it") List<UUID> fileIds,
 		@Schema(description = "Optional website, e.g. \"claude.ai\" or \"https://www.google.com/x\". Stored as the "
 				+ "bare domain (\"google.com\"). Empty or null = none.", nullable = true, example = "claude.ai")
 		@Size(max = Websites.MAX_INPUT) String website,
-		@Schema(description = "Create only: true = save even if a transaction with the same type, amount, currency "
-				+ "and date exists", nullable = true) Boolean confirmDuplicate) {
+		@Schema(description = "Create only: true = save even if a transaction with the same type, amount and date "
+				+ "exists", nullable = true) Boolean confirmDuplicate,
+		@Schema(description = "Create only: the repeat-expense reminder this transaction completes. "
+				+ "It becomes DONE and linked.", nullable = true) UUID recurringOccurrenceId) {
 
 	public TransactionRequest {
 		description = (description != null) ? description.strip() : null;

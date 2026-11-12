@@ -75,7 +75,7 @@ class SecurityRulesWebTests {
 
 	@Test
 	void employeeCannotUseAdminApi() {
-		assertThat(this.mvc.get().uri("/api/admin/users").with(as(Role.EMPLOYEE))).hasStatus(HttpStatus.FORBIDDEN)
+		assertThat(this.mvc.get().uri("/api/admin/users").with(as(Role.MEMBER))).hasStatus(HttpStatus.FORBIDDEN)
 			.bodyJson()
 			.extractingPath("$.error")
 			.isEqualTo("forbidden");
@@ -84,7 +84,7 @@ class SecurityRulesWebTests {
 	@Test
 	void adminAndOwnerCanUseAdminApi() {
 		given(this.userAdminService.list(any())).willReturn(List.of());
-		assertThat(this.mvc.get().uri("/api/admin/users").with(as(Role.ADMIN))).hasStatus(HttpStatus.OK);
+		assertThat(this.mvc.get().uri("/api/admin/users").with(as(Role.OWNER))).hasStatus(HttpStatus.OK);
 		assertThat(this.mvc.get().uri("/api/admin/users").with(as(Role.OWNER))).hasStatus(HttpStatus.OK);
 	}
 
@@ -93,7 +93,7 @@ class SecurityRulesWebTests {
 		String csrf = csrfToken();
 		assertThat(this.mvc.post()
 			.uri("/api/admin/users")
-			.with(as(Role.EMPLOYEE))
+			.with(as(Role.MEMBER))
 			.cookie(new Cookie("XSRF-TOKEN", csrf))
 			.header("X-XSRF-TOKEN", csrf)
 			.contentType(MediaType.APPLICATION_JSON)
@@ -137,7 +137,7 @@ class SecurityRulesWebTests {
 
 	@Test
 	void loginWithCsrfReturnsUserAndNewCsrfCookie() {
-		User user = User.invite("a@example.com", Role.EMPLOYEE, Instant.now());
+		User user = User.invite("a@example.com", Role.MEMBER, Instant.now());
 		user.setNames("Ada", null, Instant.now());
 		given(this.authService.login(eq("a@example.com"), eq("correct-password"), anyString())).willReturn(user);
 		String csrf = csrfToken();
@@ -150,7 +150,7 @@ class SecurityRulesWebTests {
 			.exchange();
 		assertThat(result).hasStatus(HttpStatus.OK);
 		assertThat(result).bodyJson().extractingPath("$.email").isEqualTo("a@example.com");
-		assertThat(result).bodyJson().extractingPath("$.role").isEqualTo("EMPLOYEE");
+		assertThat(result).bodyJson().extractingPath("$.role").isEqualTo("MEMBER");
 		assertThat(result).bodyJson().extractingPath("$.id").isEqualTo(user.getId().toString());
 		assertThat(result).bodyJson().extractingPath("$.firstName").isEqualTo("Ada");
 		assertThat(result).bodyJson().extractingPath("$.lastName").isNull();
@@ -202,7 +202,7 @@ class SecurityRulesWebTests {
 
 	@Test
 	void adminActionPassesCaller() {
-		AuthUser admin = new AuthUser(UUID.randomUUID(), "admin@example.com", Role.ADMIN);
+		AuthUser admin = new AuthUser(UUID.randomUUID(), "admin@example.com", Role.OWNER);
 		UUID target = UUID.randomUUID();
 		String csrf = csrfToken();
 		assertThat(this.mvc.post()

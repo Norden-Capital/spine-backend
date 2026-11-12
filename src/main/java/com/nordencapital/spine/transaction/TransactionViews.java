@@ -22,17 +22,14 @@ import com.nordencapital.spine.file.FileResponse;
 import com.nordencapital.spine.file.StoredFile;
 import com.nordencapital.spine.file.StoredFileRepository;
 import com.nordencapital.spine.logo.LogoService;
-import com.nordencapital.spine.tag.Tag;
-import com.nordencapital.spine.tag.TagRepository;
 import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
-import com.nordencapital.spine.transaction.TransactionResponse.TagRef;
 import com.nordencapital.spine.transaction.TransactionResponse.UserRef;
 import com.nordencapital.spine.user.Role;
 import com.nordencapital.spine.user.User;
 import com.nordencapital.spine.user.UserRepository;
 
 /**
- * Turns transactions into API responses. Loads users, categories, tags and files for all
+ * Turns transactions into API responses. Loads users, categories and files for all
  * given transactions at once (a few queries, not a few per row).
  */
 @Component
@@ -42,17 +39,14 @@ class TransactionViews {
 
 	private final CategoryRepository categories;
 
-	private final TagRepository tags;
-
 	private final StoredFileRepository files;
 
 	private final LogoService logos;
 
-	TransactionViews(UserRepository users, CategoryRepository categories, TagRepository tags,
+	TransactionViews(UserRepository users, CategoryRepository categories,
 			StoredFileRepository files, LogoService logos) {
 		this.users = users;
 		this.categories = categories;
-		this.tags = tags;
 		this.files = files;
 		this.logos = logos;
 	}
@@ -74,15 +68,6 @@ class TransactionViews {
 			.toList();
 	}
 
-	/** Display names of a set of tags, sorted, as "a, b" (empty string if none). */
-	String tagNames(Collection<UUID> tagIds) {
-		return this.tags.findAllById(tagIds)
-			.stream()
-			.map(Tag::getName)
-			.sorted(String.CASE_INSENSITIVE_ORDER)
-			.collect(Collectors.joining(", "));
-	}
-
 	/** Display names of files, in upload order, as "a.pdf, b.jpg" (empty string if none). */
 	String fileNames(Collection<UUID> fileIds) {
 		return this.files.findAllById(fileIds)
@@ -97,11 +82,16 @@ class TransactionViews {
 	}
 
 	static boolean canDelete(Transaction transaction, User actor) {
-		return transaction.getCreatedBy().equals(actor.getId()) || isManager(actor);
+		return canEdit(transaction, actor);
 	}
 
-	static boolean isManager(User user) {
-		return user.getRole() == Role.OWNER || user.getRole() == Role.ADMIN;
+	/** The person who added it, or the OWNER. */
+	static boolean canEdit(Transaction transaction, User actor) {
+		return transaction.getCreatedBy().equals(actor.getId()) || isOwner(actor);
+	}
+
+	static boolean isOwner(User user) {
+		return user.getRole() == Role.OWNER;
 	}
 
 	/** "1234.50" style money text. */
@@ -116,19 +106,12 @@ class TransactionViews {
 		String logoUrl = LogoService.firstLogo(lookups.logoUrls(), tx.getWebsite(),
 				(category != null) ? category.getWebsite() : null, (parent != null) ? parent.getWebsite() : null);
 		CategoryRef categoryRef = (category != null) ? new CategoryRef(category.getId(), category.getName(),
-				category.getIcon(), category.isArchived(), category.getParentId()) : null;
-		List<TagRef> tagRefs = tx.getTagIds()
-			.stream()
-			.map(lookups.tags()::get)
-			.filter(Objects::nonNull)
-			.sorted(Comparator.comparing(Tag::getName, String.CASE_INSENSITIVE_ORDER))
-			.map((tag) -> new TagRef(tag.getId(), tag.getName()))
-			.toList();
+				category.getIcon(), category.isArchived(), category.getParentId(), category.getKind()) : null;
 		List<FileResponse> fileRefs = lookups.files().getOrDefault(tx.getId(), List.of());
-		return new TransactionResponse(tx.getId(), tx.getType(), money(tx.getAmount()), tx.getCurrency(),
-				tx.getDate(), tx.getDescription(), tx.getWebsite(), logoUrl, categoryRef, tagRefs, fileRefs,
+		return new TransactionResponse(tx.getId(), tx.getType(), money(tx.getAmount()),
+				tx.getDate(), tx.getDescription(), tx.getWebsite(), logoUrl, categoryRef, fileRefs,
 				userRef(lookups.users(), tx.getCreatedBy()), tx.getCreatedAt(),
-				userRef(lookups.users(), tx.getUpdatedBy()), tx.getUpdatedAt(), canDelete(tx, actor));
+				userRef(lookups.users(), tx.getUpdatedBy()), tx.getUpdatedAt(), canEdit(tx, actor), canDelete(tx, actor));
 	}
 
 	static UserRef userRef(Map<UUID, User> users, UUID id) {
@@ -136,13 +119,13 @@ class TransactionViews {
 			return null;
 		}
 		User user = users.get(id);
-		return new UserRef(id, (user != null) ? user.displayName() : null);
+		return new UserRef(id, (user != null) ? user.displayName() : null,
+				(user != null) ? user.avatarSeed() : com.nordencapital.spine.user.Avatars.seed(id, null));
 	}
 
 	private Lookups lookups(List<Transaction> transactions) {
 		Set<UUID> userIds = new HashSet<>();
 		Set<UUID> categoryIds = new HashSet<>();
-		Set<UUID> tagIds = new HashSet<>();
 		Set<UUID> transactionIds = new HashSet<>();
 		Set<String> websites = new HashSet<>();
 		for (Transaction tx : transactions) {
@@ -150,7 +133,6 @@ class TransactionViews {
 				.filter(Objects::nonNull)
 				.forEach(userIds::add);
 			categoryIds.add(tx.getCategoryId());
-			tagIds.addAll(tx.getTagIds());
 			transactionIds.add(tx.getId());
 			if (tx.getWebsite() != null) {
 				websites.add(tx.getWebsite());
@@ -180,7 +162,7 @@ class TransactionViews {
 							Collectors.mapping(FileResponse::from, Collectors.toList())));
 		return new Lookups(byId(this.users.findAllById(userIds), User::getId),
 				categoriesById,
-				byId(this.tags.findAllById(tagIds), Tag::getId), filesByTransaction, this.logos.logoUrls(websites));
+				filesByTransaction, this.logos.logoUrls(websites));
 	}
 
 	private static <T> Map<UUID, T> byId(List<T> items, Function<T, UUID> id) {
@@ -191,7 +173,7 @@ class TransactionViews {
 		return byId(this.users.findAllById(ids), User::getId);
 	}
 
-	private record Lookups(Map<UUID, User> users, Map<UUID, Category> categories, Map<UUID, Tag> tags,
+	private record Lookups(Map<UUID, User> users, Map<UUID, Category> categories,
 			Map<UUID, List<FileResponse>> files, Map<String, String> logoUrls) {
 	}
 

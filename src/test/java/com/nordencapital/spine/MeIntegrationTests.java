@@ -43,7 +43,7 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void writesNeedCsrfToken() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		MvcTestResult result = loggedIn("emp@example.com").putWithoutCsrf("/api/me/preferences", TORONTO_PREFS);
 		assertThat(result).hasStatus(HttpStatus.FORBIDDEN);
 		assertThat(result).bodyJson().extractingPath("$.error").isEqualTo("csrf_invalid");
@@ -51,14 +51,14 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void profileShowsOwnData() throws Exception {
-		User user = activeUser("emp@example.com", Role.EMPLOYEE);
-		activeUser("other@example.com", Role.EMPLOYEE);
+		User user = activeUser("emp@example.com", Role.MEMBER);
+		activeUser("other@example.com", Role.MEMBER);
 
 		MvcTestResult result = loggedIn("emp@example.com").get("/api/me");
 		assertThat(result).hasStatus(HttpStatus.OK);
 		assertThat(result).bodyJson().extractingPath("$.id").isEqualTo(user.getId().toString());
 		assertThat(result).bodyJson().extractingPath("$.email").isEqualTo("emp@example.com");
-		assertThat(result).bodyJson().extractingPath("$.role").isEqualTo("EMPLOYEE");
+		assertThat(result).bodyJson().extractingPath("$.role").isEqualTo("MEMBER");
 		assertThat(result).bodyJson().extractingPath("$.status").isEqualTo("ACTIVE");
 		assertThat(result).bodyJson().extractingPath("$.firstName").isNull();
 		assertThat(result).bodyJson().extractingPath("$.lastName").isNull();
@@ -69,7 +69,7 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void previousLoginIsTheOneBeforeThisSession() {
-		User user = activeUser("emp@example.com", Role.EMPLOYEE);
+		User user = activeUser("emp@example.com", Role.MEMBER);
 		Client first = loggedIn("emp@example.com");
 		assertThat(first.get("/api/me")).bodyJson().extractingPath("$.previousLoginAt").isNull();
 		java.time.Instant firstLogin = this.jdbc.queryForObject(
@@ -90,8 +90,8 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void namesAreTrimmedAndShownInAuthMe() {
-		User user = activeUser("emp@example.com", Role.EMPLOYEE);
-		User other = activeUser("other@example.com", Role.EMPLOYEE);
+		User user = activeUser("emp@example.com", Role.MEMBER);
+		User other = activeUser("other@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 
 		MvcTestResult saved = client.patch("/api/me", "{\"firstName\":\"  Ada \",\"lastName\":\"   \"}");
@@ -103,7 +103,7 @@ class MeIntegrationTests extends IntegrationTestBase {
 		MvcTestResult me = client.get("/api/auth/me");
 		assertThat(me).bodyJson().extractingPath("$.firstName").isEqualTo("Ada");
 		assertThat(me).bodyJson().extractingPath("$.lastName").isNull();
-		assertThat(me).bodyJson().extractingPath("$.role").isEqualTo("EMPLOYEE");
+		assertThat(me).bodyJson().extractingPath("$.role").isEqualTo("MEMBER");
 
 		assertThat(reload(user.getId()).getFirstName()).isEqualTo("Ada");
 		assertThat(reload(other.getId()).getFirstName()).isNull();
@@ -111,7 +111,7 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void namesAreValidated() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 
 		MvcTestResult tooLong = client.patch("/api/me", "{\"firstName\":\"" + "x".repeat(61) + "\",\"lastName\":null}");
@@ -129,9 +129,9 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void loginAttemptsOfKnownUsersAreRecorded() {
-		User active = activeUser("active@example.com", Role.EMPLOYEE);
-		User disabled = disabledUser("disabled@example.com", Role.EMPLOYEE);
-		User invited = invitedUser("invited@example.com", Role.EMPLOYEE);
+		User active = activeUser("active@example.com", Role.MEMBER);
+		User disabled = disabledUser("disabled@example.com", Role.MEMBER);
+		User invited = invitedUser("invited@example.com", Role.MEMBER);
 
 		assertThat(client().login("active@example.com", PASSWORD)).hasStatus(HttpStatus.OK);
 		assertThat(client().login("active@example.com", "wrong-password-123")).hasStatus(HttpStatus.UNAUTHORIZED);
@@ -150,8 +150,8 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void signInsAreGroupedByDayInMyTimeZone() {
-		User user = activeUser("emp@example.com", Role.EMPLOYEE);
-		User other = activeUser("other@example.com", Role.EMPLOYEE);
+		User user = activeUser("emp@example.com", Role.MEMBER);
+		User other = activeUser("other@example.com", Role.MEMBER);
 		// 03:00 UTC is 23:00 the day before in Toronto (UTC-4, summer time since March 8).
 		insertEvent(user.getId(), "2026-03-10T03:00:00Z", true);
 		insertEvent(user.getId(), "2026-03-10T12:00:00Z", false);
@@ -180,7 +180,7 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void signInsDefaultToTheLastSixMonths() {
-		User user = activeUser("emp@example.com", Role.EMPLOYEE);
+		User user = activeUser("emp@example.com", Role.MEMBER);
 		insertEvent(user.getId(), Instant.now().minus(Duration.ofDays(200)).toString(), true);
 		insertEvent(user.getId(), Instant.now().minus(Duration.ofDays(30)).toString(), false);
 		Client client = loggedIn("emp@example.com");
@@ -196,7 +196,7 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void changePasswordKeepsThisSessionAndLogsOutTheOthers() {
-		User user = activeUser("emp@example.com", Role.EMPLOYEE);
+		User user = activeUser("emp@example.com", Role.MEMBER);
 		Client here = loggedIn("emp@example.com");
 		Client otherDevice = loggedIn("emp@example.com");
 		assertThat(sessionCount(user.getId())).isEqualTo(2);
@@ -213,7 +213,7 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void changePasswordChecksCurrentAndNewPassword() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 
 		MvcTestResult wrong = client.post("/api/me/password", changeBody("not-my-password", NEW_PASSWORD));
@@ -232,7 +232,7 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void tooManyWrongCurrentPasswordsAreBlocked() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 		for (int i = 0; i < 5; i++) {
 			assertThat(client.post("/api/me/password", changeBody("wrong-password-" + i, NEW_PASSWORD)))
@@ -247,8 +247,8 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void preferencesHaveDefaultsAndAreSavedPerUser() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
-		activeUser("other@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
+		activeUser("other@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 		String defaults = "{\"dateFormat\":\"DD/MM/YYYY\",\"timeZone\":null,\"theme\":\"SYSTEM\","
 				+ "\"font\":\"GEIST\",\"textSize\":\"NORMAL\"}";
@@ -268,7 +268,7 @@ class MeIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void preferencesAreValidated() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 
 		assertValidationError(client.put("/api/me/preferences", TORONTO_PREFS.replace("DARK", "PINK")));

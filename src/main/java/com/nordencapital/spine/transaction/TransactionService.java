@@ -29,6 +29,7 @@ import com.nordencapital.spine.category.Category;
 import com.nordencapital.spine.category.CategoryRepository;
 import com.nordencapital.spine.category.CategoryService;
 import com.nordencapital.spine.common.ApiException;
+import com.nordencapital.spine.common.CategoryKinds;
 import com.nordencapital.spine.common.DuplicateException;
 import com.nordencapital.spine.common.ListFilter;
 import com.nordencapital.spine.common.ListPage;
@@ -38,24 +39,21 @@ import com.nordencapital.spine.file.StoredFile;
 import com.nordencapital.spine.file.StoredFileRepository;
 import com.nordencapital.spine.logo.LogoService;
 import com.nordencapital.spine.me.UserZones;
-import com.nordencapital.spine.tag.Tag;
-import com.nordencapital.spine.tag.TagRepository;
 import com.nordencapital.spine.transaction.HistoryEntry.Change;
 import com.nordencapital.spine.user.Actors;
 import com.nordencapital.spine.user.User;
 
 /**
- * Company transactions. Shared: every logged-in user sees and edits all of them.
+ * Company transactions. Shared: every logged-in user sees all of them and can add; the person who added
+ * one, or the OWNER, can change or trash it.
  * <ul>
  * <li>Every transaction needs 1 to 5 proof files (uploaded first, then attached).</li>
- * <li>Trash (soft delete): its creator, OWNER or ADMIN. Restore: OWNER or ADMIN.</li>
+ * <li>Change, proof files and trash: its creator or the OWNER. Restore: OWNER.</li>
  * <li>Every create, real change, delete and restore is written to the history.</li>
  * </ul>
  */
 @Service
 public class TransactionService {
-
-	static final int MAX_TAGS = 10;
 
 	static final int MAX_FILES = 5;
 
@@ -67,14 +65,12 @@ public class TransactionService {
 	 */
 	private static final ZoneId LATEST_ZONE = ZoneOffset.ofHours(14);
 
-	private static final TransactionSearch SEARCH = new TransactionSearch("transactions", "transaction_tags",
+	private static final TransactionSearch SEARCH = new TransactionSearch("transactions",
 			"categories", "transaction_comments");
 
 	private final TransactionRepository transactions;
 
 	private final CategoryRepository categories;
-
-	private final TagRepository tags;
 
 	private final StoredFileRepository files;
 
@@ -92,14 +88,16 @@ public class TransactionService {
 
 	private final LogoService logos;
 
+	private final com.nordencapital.spine.recurring.CompanyRecurring recurring;
+
 	private final Clock clock;
 
-	public TransactionService(TransactionRepository transactions, CategoryRepository categories, TagRepository tags,
+	public TransactionService(TransactionRepository transactions, CategoryRepository categories,
 			StoredFileRepository files, TransactionViews views, TransactionHistory history, Actors actors,
-			UserZones zones, CategoryService categoryService, JdbcTemplate jdbc, LogoService logos, Clock clock) {
+			UserZones zones, CategoryService categoryService, JdbcTemplate jdbc, LogoService logos,
+			com.nordencapital.spine.recurring.CompanyRecurring recurring, Clock clock) {
 		this.transactions = transactions;
 		this.categories = categories;
-		this.tags = tags;
 		this.files = files;
 		this.views = views;
 		this.history = history;
@@ -108,6 +106,7 @@ public class TransactionService {
 		this.categoryService = categoryService;
 		this.jdbc = jdbc;
 		this.logos = logos;
+		this.recurring = recurring;
 		this.clock = clock;
 	}
 
@@ -121,6 +120,9 @@ public class TransactionService {
 		User actor = this.actors.active(principal);
 		YearMonth thisMonth = YearMonth.now(this.clock.withZone(this.zones.saved(actor.getId()).orElse(ZoneOffset.UTC)));
 		ListFilter filter = ListFilter.parse(params, thisMonth);
+		if (filter.createdBy() != null && !TransactionViews.isOwner(actor)) {
+			throw new ApiException(HttpStatus.FORBIDDEN, "forbidden", "Only the owner can filter by person");
+		}
 		TransactionSearch.Result result = SEARCH.run(this.jdbc, filter, "t.deleted_at IS NULL", List.of(), "created_by");
 		Map<UUID, Transaction> found = this.transactions.findAllById(result.ids())
 			.stream()
@@ -142,8 +144,10 @@ public class TransactionService {
 	/**
 	 * @throws ApiException 400 {@code validation_error}, {@code proof_required},
 	 * {@code future_date}
-	 * @throws DuplicateException (409) same type, amount, currency and date exists, and
+	 * @throws DuplicateException (409) same type, amount and date exists, and
 	 * confirmDuplicate is not true
+	 * @throws ApiException with recurringOccurrenceId: 403 {@code forbidden}, 404
+	 * {@code occurrence_not_found}, 409 {@code occurrence_not_due} (nothing is saved)
 	 */
 	@Transactional
 	public TransactionResponse create(AuthUser principal, TransactionRequest request) {
@@ -160,6 +164,9 @@ public class TransactionService {
 		checked.files().forEach((file) -> file.attachTo(transaction.getId()));
 		this.history.record(transaction.getId(), actor.getId(), TransactionHistory.CREATED,
 				diff(Snapshot.EMPTY, snapshot(checked)), now);
+		if (request.recurringOccurrenceId() != null) {
+			this.recurring.markDone(actor, request.recurringOccurrenceId(), transaction.getId());
+		}
 		this.logos.prefetch(transaction.getWebsite());
 		return this.views.one(transaction, actor);
 	}
@@ -174,6 +181,10 @@ public class TransactionService {
 	public TransactionResponse update(AuthUser principal, UUID id, TransactionRequest request) {
 		User actor = this.actors.active(principal);
 		Transaction transaction = active(id);
+		if (!TransactionViews.canEdit(transaction, actor)) {
+			throw new ApiException(HttpStatus.FORBIDDEN, "forbidden",
+					"Only the person who added it or the owner can change it");
+		}
 		Checked checked = check(request, actor, transaction);
 		List<StoredFile> currentFiles = this.files.findAllByTransactionIdInOrderByCreatedAtAsc(Set.of(id));
 		Snapshot before = snapshot(transaction, currentFiles);
@@ -195,7 +206,7 @@ public class TransactionService {
 	/**
 	 * Moves to the trash.
 	 * @throws ApiException 404 {@code transaction_not_found}, 403 {@code forbidden} (not
-	 * its creator, not OWNER or ADMIN)
+	 * not its creator, not the OWNER)
 	 */
 	@Transactional
 	public void trash(AuthUser principal, UUID id) {
@@ -203,27 +214,27 @@ public class TransactionService {
 		Transaction transaction = active(id);
 		if (!TransactionViews.canDelete(transaction, actor)) {
 			throw new ApiException(HttpStatus.FORBIDDEN, "forbidden",
-					"Only the person who added it, an admin or the owner can delete it");
+					"Only the person who added it or the owner can delete it");
 		}
 		Instant now = this.clock.instant();
 		transaction.trash(actor.getId(), now);
 		this.history.record(id, actor.getId(), TransactionHistory.DELETED, List.of(), now);
 	}
 
-	/** The trash (OWNER and ADMIN), last trashed first. */
+	/** The trash (OWNER), last trashed first. */
 	@Transactional(readOnly = true)
 	public List<TrashedTransactionResponse> trashList(AuthUser principal) {
-		User actor = this.actors.manager(principal);
+		User actor = this.actors.owner(principal);
 		return this.views.trashed(this.transactions.findAllByDeletedAtIsNotNullOrderByDeletedAtDesc(), actor);
 	}
 
 	/**
-	 * Takes a transaction out of the trash (OWNER and ADMIN). Not in the trash: no change.
+	 * Takes a transaction out of the trash (OWNER). Not in the trash: no change.
 	 * @throws ApiException 404 {@code transaction_not_found}
 	 */
 	@Transactional
 	public TransactionResponse restore(AuthUser principal, UUID id) {
-		User actor = this.actors.manager(principal);
+		User actor = this.actors.owner(principal);
 		Transaction transaction = this.transactions.findById(id).orElseThrow(TransactionService::notFound);
 		if (transaction.isTrashed()) {
 			Instant now = this.clock.instant();
@@ -234,14 +245,14 @@ public class TransactionService {
 	}
 
 	/**
-	 * History, newest first. Trashed transactions: OWNER and ADMIN only.
+	 * History, newest first. Trashed transactions: OWNER only.
 	 * @throws ApiException 404 {@code transaction_not_found}
 	 */
 	@Transactional(readOnly = true)
 	public List<HistoryEntry> history(AuthUser principal, UUID id) {
 		User actor = this.actors.active(principal);
 		Transaction transaction = this.transactions.findById(id)
-			.filter((tx) -> !tx.isTrashed() || TransactionViews.isManager(actor))
+			.filter((tx) -> !tx.isTrashed() || TransactionViews.isOwner(actor))
 			.orElseThrow(TransactionService::notFound);
 		return this.history.list(transaction.getId(), this.views.usersById(this.history.userIds(id)));
 	}
@@ -268,10 +279,6 @@ public class TransactionService {
 		if (fileIds.size() > MAX_FILES) {
 			throw invalid("fileIds: at most " + MAX_FILES + " files");
 		}
-		Set<UUID> tagIds = distinct(request.tagIds());
-		if (tagIds.size() > MAX_TAGS) {
-			throw invalid("tagIds: at most " + MAX_TAGS + " tags");
-		}
 
 		Category category = this.categories.findById(request.categoryId())
 			.orElseThrow(() -> invalid("categoryId: unknown category"));
@@ -279,14 +286,9 @@ public class TransactionService {
 		if (!keepsOldCategory && !this.categoryService.isPickable(category)) {
 			throw invalid("categoryId: this category (or its parent) is archived");
 		}
-
-		Set<UUID> oldTags = (existing != null) ? existing.getTagIds() : Set.of();
-		List<Tag> foundTags = this.tags.findAllById(tagIds);
-		if (foundTags.size() != tagIds.size()) {
-			throw invalid("tagIds: unknown tag");
-		}
-		if (foundTags.stream().anyMatch((tag) -> tag.isArchived() && !oldTags.contains(tag.getId()))) {
-			throw invalid("tagIds: a tag is archived");
+		// Old transactions may not fit (made before the split): checked only when changed.
+		if (!keepsOldCategory || !existing.getType().equals(request.type())) {
+			CategoryKinds.checkFits(category.getKind(), request.type());
 		}
 
 		List<StoredFile> foundFiles = this.files.findAllById(fileIds);
@@ -300,9 +302,9 @@ public class TransactionService {
 		foundFiles = new ArrayList<>(foundFiles);
 		foundFiles.sort((a, b) -> a.getCreatedAt().compareTo(b.getCreatedAt()));
 
-		Transaction.Values values = new Transaction.Values(request.type(), amount.setScale(2), request.currency(),
-				date, request.description(), website, category.getId(), tagIds);
-		return new Checked(values, category, foundTags, foundFiles);
+		Transaction.Values values = new Transaction.Values(request.type(), amount.setScale(2),
+				date, request.description(), website, category.getId());
+		return new Checked(values, category, foundFiles);
 	}
 
 	private static Set<UUID> distinct(List<UUID> ids) {
@@ -321,58 +323,51 @@ public class TransactionService {
 
 	// ---- totals and history ----
 
-	/** Non-trashed transactions with the same type, amount, currency and date (newest 5). */
+	/** Non-trashed transactions with the same type, amount and date (newest 5). */
 	private List<DuplicateException.Match> duplicates(Transaction.Values values) {
 		List<Object[]> rows = this.jdbc.query(
 				"SELECT id, description, created_by, created_at FROM transactions WHERE deleted_at IS NULL AND type = ? "
-						+ "AND amount = ? AND currency = ? AND date = ? ORDER BY created_at DESC LIMIT 5",
+						+ "AND amount = ? AND date = ? ORDER BY created_at DESC LIMIT 5",
 				(rs, row) -> new Object[] { rs.getObject("id", UUID.class), rs.getString("description"),
 						rs.getObject("created_by", UUID.class), rs.getTimestamp("created_at").toInstant() },
-				values.type(), values.amount(), values.currency(), java.sql.Date.valueOf(values.date()));
+				values.type(), values.amount(), java.sql.Date.valueOf(values.date()));
 		Map<UUID, User> users = this.views.usersById(rows.stream().map((row) -> (UUID) row[2]).toList());
 		return rows.stream().map((row) -> {
 			User user = users.get((UUID) row[2]);
 			return new DuplicateException.Match((UUID) row[0], (String) row[1],
-					new DuplicateException.UserRef((UUID) row[2], (user != null) ? user.displayName() : null),
+					new DuplicateException.UserRef((UUID) row[2], (user != null) ? user.displayName() : null,
+							(user != null) ? user.avatarSeed() : com.nordencapital.spine.user.Avatars.seed((UUID) row[2], null)),
 					(Instant) row[3]);
 		}).toList();
 	}
 
 	private Snapshot snapshot(Transaction tx, List<StoredFile> currentFiles) {
-		return new Snapshot(tx.getType(), TransactionViews.money(tx.getAmount()), tx.getCurrency(),
+		return new Snapshot(tx.getType(), TransactionViews.money(tx.getAmount()),
 				tx.getDate().toString(), tx.getDescription(), tx.getWebsite(), tx.getCategoryId(),
-				this.views.categoryName(tx.getCategoryId()), tx.getTagIds(), this.views.tagNames(tx.getTagIds()),
+				this.views.categoryName(tx.getCategoryId()),
 				currentFiles.stream().map(StoredFile::getId).collect(Collectors.toSet()),
 				currentFiles.stream().map(StoredFile::getOriginalName).collect(Collectors.joining(", ")));
 	}
 
 	private static Snapshot snapshot(Checked checked) {
 		Transaction.Values v = checked.values();
-		return new Snapshot(v.type(), TransactionViews.money(v.amount()), v.currency(), v.date().toString(),
-				v.description(), v.website(), checked.category().getId(), checked.category().getName(), v.tagIds(),
-				checked.tags()
-					.stream()
-					.map(Tag::getName)
-					.sorted(String.CASE_INSENSITIVE_ORDER)
-					.collect(Collectors.joining(", ")),
+		return new Snapshot(v.type(), TransactionViews.money(v.amount()), v.date().toString(),
+				v.description(), v.website(), checked.category().getId(), checked.category().getName(),
 				checked.files().stream().map(StoredFile::getId).collect(Collectors.toSet()),
 				checked.files().stream().map(StoredFile::getOriginalName).collect(Collectors.joining(", ")));
 	}
 
-	/** Only fields that really changed. Tags and files compare by id, show names. */
+	/** Only fields that really changed. Files compare by id, show names. */
 	private static List<Change> diff(Snapshot before, Snapshot after) {
 		List<Change> changes = new ArrayList<>();
 		add(changes, "type", before.type(), after.type(), Objects.equals(before.type(), after.type()));
 		add(changes, "amount", before.amount(), after.amount(), Objects.equals(before.amount(), after.amount()));
-		add(changes, "currency", before.currency(), after.currency(),
-				Objects.equals(before.currency(), after.currency()));
 		add(changes, "date", before.date(), after.date(), Objects.equals(before.date(), after.date()));
 		add(changes, "description", before.description(), after.description(),
 				Objects.equals(before.description(), after.description()));
 		add(changes, "website", before.website(), after.website(), Objects.equals(before.website(), after.website()));
 		add(changes, "category", before.categoryName(), after.categoryName(),
 				Objects.equals(before.categoryId(), after.categoryId()));
-		add(changes, "tags", before.tagNames(), after.tagNames(), Objects.equals(before.tagIds(), after.tagIds()));
 		add(changes, "files", before.fileNames(), after.fileNames(), Objects.equals(before.fileIds(), after.fileIds()));
 		return changes;
 	}
@@ -399,16 +394,15 @@ public class TransactionService {
 		return new ApiException(HttpStatus.BAD_REQUEST, "validation_error", message);
 	}
 
-	private record Checked(Transaction.Values values, Category category, List<Tag> tags, List<StoredFile> files) {
+	private record Checked(Transaction.Values values, Category category, List<StoredFile> files) {
 	}
 
 	/** Display values of all fields, to compare before and after. */
-	private record Snapshot(String type, String amount, String currency, String date, String description,
-			String website, UUID categoryId, String categoryName, Set<UUID> tagIds, String tagNames, Set<UUID> fileIds,
+	private record Snapshot(String type, String amount, String date, String description,
+			String website, UUID categoryId, String categoryName, Set<UUID> fileIds,
 			String fileNames) {
 
-		static final Snapshot EMPTY = new Snapshot(null, null, null, null, null, null, null, null, Set.of(), "", Set.of(),
-				"");
+		static final Snapshot EMPTY = new Snapshot(null, null, null, null, null, null, null, Set.of(), "");
 
 	}
 

@@ -70,6 +70,18 @@ public class MeController {
 		return ProfileResponse.from(user, this.meService.previousLogin(user, SessionLogin.loginAt(request)));
 	}
 
+	@Operation(summary = "Change my face (avatar)",
+			description = "seed: 1 to 64 letters, digits or '-' (the DiceBear seed). null = back to the default seed "
+					+ "(made from my user id). Returns my profile.")
+	@ApiResponse(responseCode = "200", description = "Saved")
+	@ApiResponse(responseCode = "400", description = "validation_error",
+			content = @Content(schema = @Schema(implementation = ApiError.class)))
+	@PatchMapping("/avatar")
+	public ProfileResponse setAvatar(@AuthenticationPrincipal AuthUser principal, @Valid @RequestBody AvatarRequest body,
+			HttpServletRequest request) {
+		return response(this.meService.setAvatar(principal, body.seed()), request);
+	}
+
 	@Operation(summary = "My logins per day",
 			description = "Days with at least one login attempt, oldest first. Days are counted in my time zone "
 					+ "preference (UTC if automatic).")
@@ -118,6 +130,12 @@ public class MeController {
 	/**
 	 * Names are trimmed before validation; blank becomes null.
 	 */
+	/** @param seed null = default */
+	public record AvatarRequest(@Schema(nullable = true, example = "felix-42") @Size(max = 64)
+	@Pattern(regexp = com.nordencapital.spine.user.Avatars.SEED_PATTERN,
+			message = "must be 1 to 64 letters, digits or -") String seed) {
+	}
+
 	public record NamesRequest(
 			@Schema(nullable = true) @Size(max = 60) @Pattern(regexp = NO_CONTROL_CHARS,
 					message = "must not contain control characters") String firstName,

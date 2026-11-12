@@ -76,6 +76,8 @@ public abstract class IntegrationTestBase {
 	@BeforeEach
 	void cleanDatabase() throws IOException {
 		this.jdbc.update("DELETE FROM logos");
+		this.jdbc.update("DELETE FROM company_recurring_occurrences");
+		this.jdbc.update("DELETE FROM company_recurring");
 		this.jdbc.update("DELETE FROM notifications");
 		this.jdbc.update("DELETE FROM wallet_goal_contributions");
 		this.jdbc.update("DELETE FROM wallet_goals");
@@ -83,19 +85,17 @@ public abstract class IntegrationTestBase {
 		this.jdbc.update("DELETE FROM files");
 		this.jdbc.update("DELETE FROM wallet_transactions");
 		this.jdbc.update("DELETE FROM wallet_recurring");
-		this.jdbc.update("DELETE FROM wallet_tags");
 		this.jdbc.update("DELETE FROM wallet_categories");
 		this.jdbc.update("DELETE FROM wallet_settings");
 		this.jdbc.update("DELETE FROM transaction_comments");
 		this.jdbc.update("DELETE FROM transaction_history");
-		this.jdbc.update("DELETE FROM transaction_tags");
 		this.jdbc.update("DELETE FROM files");
 		this.jdbc.update("DELETE FROM transactions");
-		this.jdbc.update("DELETE FROM tags");
 		this.jdbc.update("DELETE FROM categories");
 		// Back to the 7 starting categories, with the same SQL as the migration.
 		this.jdbc.execute(new ClassPathResource("db/migration/V9__seed_categories.sql")
-			.getContentAsString(StandardCharsets.UTF_8));
+			.getContentAsString(StandardCharsets.UTF_8)
+			.replace("sort_order", "position")); // the column was renamed by V18
 		this.jdbc.update("DELETE FROM spring_session");
 		this.jdbc.update("DELETE FROM auth_tokens");
 		this.jdbc.update("DELETE FROM login_events");
@@ -103,6 +103,31 @@ public abstract class IntegrationTestBase {
 		this.jdbc.update("DELETE FROM users");
 		this.limiters.clearAll();
 		this.mails.clear();
+	}
+
+	/**
+	 * JSON fields of a repeat for a short name: WEEKLY, BIWEEKLY, MONTHLY, QUARTERLY,
+	 * HALFYEARLY, YEARLY (anything else is sent as an unknown unit).
+	 */
+	protected static String repeatJson(String name) {
+		String[] repeat = switch (name) {
+			case "WEEKLY" -> new String[] { "WEEK", "1" };
+			case "BIWEEKLY" -> new String[] { "WEEK", "2" };
+			case "MONTHLY" -> new String[] { "MONTH", "1" };
+			case "QUARTERLY" -> new String[] { "MONTH", "3" };
+			case "HALFYEARLY" -> new String[] { "MONTH", "6" };
+			case "YEARLY" -> new String[] { "YEAR", "1" };
+			default -> new String[] { name, "1" };
+		};
+		return "\"unit\":\"" + repeat[0] + "\",\"every\":" + repeat[1];
+	}
+
+	/** A company INCOME category for tests (the seeded ones are expenses). @return its id */
+	protected String incomeCategory(String name) {
+		this.jdbc.update("INSERT INTO categories (id, name, icon, archived, position, kind, created_at, updated_at) "
+				+ "SELECT gen_random_uuid(), ?, 'banknote', false, 100, 'INCOME', now(), now() "
+				+ "WHERE NOT EXISTS (SELECT 1 FROM categories WHERE name = ?)", name, name);
+		return this.jdbc.queryForObject("SELECT id::text FROM categories WHERE name = ?", String.class, name);
 	}
 
 	protected User activeUser(String email, Role role) {

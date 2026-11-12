@@ -21,22 +21,18 @@ public final class TransactionSearch {
 
 	private final String transactions;
 
-	private final String tagLinks;
-
 	private final String categories;
 
 	private final String comments;
 
 	/**
-	 * @param transactions table with id, type, amount, currency, date, description,
+	 * @param transactions table with id, type, amount, date, description,
 	 * category_id, created_at
-	 * @param tagLinks table with transaction_id, tag_id
 	 * @param categories table with id, parent_id
 	 * @param comments table with transaction_id, text (null = no comment search)
 	 */
-	public TransactionSearch(String transactions, String tagLinks, String categories, String comments) {
+	public TransactionSearch(String transactions, String categories, String comments) {
 		this.transactions = transactions;
-		this.tagLinks = tagLinks;
 		this.categories = categories;
 		this.comments = comments;
 	}
@@ -59,7 +55,8 @@ public final class TransactionSearch {
 		}
 		if (filter.q() != null) {
 			String like = Like.contains(filter.q());
-			where.append(" AND (lower(t.description) LIKE ? ESCAPE '\\'");
+			where.append(" AND (lower(t.description) LIKE ? ESCAPE '\\' OR t.website LIKE ? ESCAPE '\\'");
+			args.add(like);
 			args.add(like);
 			if (this.comments != null) {
 				where.append(" OR EXISTS (SELECT 1 FROM ").append(this.comments)
@@ -75,20 +72,9 @@ public final class TransactionSearch {
 			args.addAll(filter.categoryIds());
 			args.addAll(filter.categoryIds());
 		}
-		if (!filter.tagIds().isEmpty()) {
-			where.append(" AND EXISTS (SELECT 1 FROM ").append(this.tagLinks)
-				.append(" tl WHERE tl.transaction_id = t.id AND tl.tag_id IN (")
-				.append(placeholders(filter.tagIds()))
-				.append("))");
-			args.addAll(filter.tagIds());
-		}
 		if (filter.type() != null) {
 			where.append(" AND t.type = ?");
 			args.add(filter.type());
-		}
-		if (filter.currency() != null) {
-			where.append(" AND t.currency = ?");
-			args.add(filter.currency());
 		}
 		if (filter.createdBy() != null && createdByColumn != null) {
 			where.append(" AND t.").append(createdByColumn).append(" = ?");
@@ -106,17 +92,20 @@ public final class TransactionSearch {
 
 		long count = jdbc.queryForObject("SELECT count(*)" + from, Long.class, args.toArray());
 		Map<String, BigDecimal> sums = new HashMap<>();
-		jdbc.query("SELECT t.currency, t.type, sum(t.amount) AS total" + from + " GROUP BY t.currency, t.type",
+		jdbc.query("SELECT t.type, sum(t.amount) AS total" + from + " GROUP BY t.type",
 				(rs) -> {
-					sums.put(rs.getString("currency") + ":" + rs.getString("type"), rs.getBigDecimal("total"));
+					sums.put(rs.getString("type"), rs.getBigDecimal("total"));
 				}, args.toArray());
+		if (filter.size() == 0) {
+			return new Result(List.of(), count, Totals.fromSums(sums)); // count and totals only
+		}
 		List<Object> pageArgs = new ArrayList<>(args);
 		pageArgs.add(filter.size());
 		pageArgs.add((long) filter.page() * filter.size());
 		List<UUID> ids = jdbc.queryForList(
 				"SELECT t.id" + from + " ORDER BY t.date DESC, t.created_at DESC, t.id LIMIT ? OFFSET ?", UUID.class,
 				pageArgs.toArray());
-		return new Result(ids, count, Totals.perCurrency(sums));
+		return new Result(ids, count, Totals.fromSums(sums));
 	}
 
 	private static String placeholders(Collection<?> values) {
@@ -127,10 +116,10 @@ public final class TransactionSearch {
 	 * @param ids the ids of this page, in list order
 	 * @param count all matching items
 	 */
-	public record Result(List<UUID> ids, long count, Map<String, Totals> totals) {
+	public record Result(List<UUID> ids, long count, Totals totals) {
 
 		public boolean hasNext(ListFilter filter) {
-			return (long) (filter.page() + 1) * filter.size() < this.count;
+			return filter.size() > 0 && (long) (filter.page() + 1) * filter.size() < this.count;
 		}
 
 	}

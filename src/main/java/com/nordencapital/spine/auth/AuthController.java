@@ -149,12 +149,14 @@ public class AuthController {
 	/**
 	 * @param firstName null if not set
 	 * @param lastName null if not set
+	 * @param avatarSeed DiceBear seed (never null)
 	 */
-	public record MeResponse(java.util.UUID id, String email, Role role, String firstName, String lastName) {
+	public record MeResponse(java.util.UUID id, String email, Role role, String firstName, String lastName,
+			String avatarSeed) {
 
 		public static MeResponse from(User user) {
 			return new MeResponse(user.getId(), user.getEmail(), user.getRole(), user.getFirstName(),
-					user.getLastName());
+					user.getLastName(), user.avatarSeed());
 		}
 
 	}

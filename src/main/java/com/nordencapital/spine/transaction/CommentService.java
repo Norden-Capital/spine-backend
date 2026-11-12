@@ -20,7 +20,7 @@ import com.nordencapital.spine.user.User;
 
 /**
  * Comments on company transactions (not trashed). Every user can read and add; the
- * author, OWNER and ADMIN can delete. Comments are not in the history.
+ * author and the OWNER can delete. Comments are not in the history.
  */
 @Service
 public class CommentService {
@@ -76,7 +76,7 @@ public class CommentService {
 
 	/**
 	 * @throws ApiException 404 {@code transaction_not_found} or {@code comment_not_found},
-	 * 403 {@code forbidden} (not the author, not OWNER or ADMIN)
+	 * 403 {@code forbidden} (not the author, not the OWNER)
 	 */
 	@Transactional
 	public void delete(AuthUser principal, UUID transactionId, UUID commentId) {
@@ -88,9 +88,9 @@ public class CommentService {
 			.stream()
 			.findFirst()
 			.orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "comment_not_found", "Comment not found"));
-		if (!author.equals(actor.getId()) && !TransactionViews.isManager(actor)) {
+		if (!author.equals(actor.getId()) && !TransactionViews.isOwner(actor)) {
 			throw new ApiException(HttpStatus.FORBIDDEN, "forbidden",
-					"Only the author, an admin or the owner can delete this comment");
+					"Only the author or the owner can delete this comment");
 		}
 		this.jdbc.update("DELETE FROM transaction_comments WHERE id = ?", commentId);
 	}
@@ -102,7 +102,7 @@ public class CommentService {
 	}
 
 	private static CommentResponse toResponse(Row row, Map<UUID, User> users, User actor) {
-		boolean canDelete = row.userId().equals(actor.getId()) || TransactionViews.isManager(actor);
+		boolean canDelete = row.userId().equals(actor.getId()) || TransactionViews.isOwner(actor);
 		return new CommentResponse(row.id(), row.text(), TransactionViews.userRef(users, row.userId()), row.createdAt(),
 				canDelete);
 	}

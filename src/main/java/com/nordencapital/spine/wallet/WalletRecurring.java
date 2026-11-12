@@ -28,8 +28,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import com.nordencapital.spine.alert.AlertService;
 import com.nordencapital.spine.common.ApiException;
+import com.nordencapital.spine.common.CategoryKinds;
 import com.nordencapital.spine.common.Money;
 import com.nordencapital.spine.common.Names;
+import com.nordencapital.spine.common.Recurrence;
 import com.nordencapital.spine.common.Totals;
 import com.nordencapital.spine.me.UserZones;
 import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
@@ -43,13 +45,16 @@ import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
 @Component
 public class WalletRecurring {
 
+	/** How many next dates the API shows. */
+	static final int UPCOMING_COUNT = 6;
+
 	/** Safety stop for one item in one run (more than a year of weekly items). */
 	private static final int MAX_CATCH_UP = 60;
 
 	private static final Logger logger = LoggerFactory.getLogger(WalletRecurring.class);
 
-	private static final String COLUMNS = "id, user_id, name, type, amount, currency, category_id, description, "
-			+ "frequency, start_date, next_date, active";
+	private static final String COLUMNS = "id, user_id, name, type, amount, category_id, description, "
+			+ "repeat_unit, repeat_every, start_date, next_date, active, paused_until";
 
 	private final JdbcTemplate jdbc;
 
@@ -85,15 +90,15 @@ public class WalletRecurring {
 	/** @throws ApiException 400 {@code validation_error} */
 	@Transactional
 	public Recurring create(UUID userId, RecurringRequest request) {
-		Valid valid = check(userId, request);
+		Valid valid = check(userId, request, null);
 		UUID id = UUID.randomUUID();
 		Timestamp now = Timestamp.from(this.clock.instant());
-		this.jdbc.update("INSERT INTO wallet_recurring (id, user_id, name, type, amount, currency, category_id, description, "
-				+ "frequency, start_date, next_date, active, created_at, updated_at) "
+		this.jdbc.update("INSERT INTO wallet_recurring (id, user_id, name, type, amount, category_id, description, "
+				+ "repeat_unit, repeat_every, start_date, next_date, active, created_at, updated_at) "
 				+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, true, ?, ?)", id, userId, request.name(), request.type(),
-				valid.amount(), request.currency(), request.categoryId(), request.description(), request.frequency(),
+				valid.amount(), request.categoryId(), request.description(), request.unit(), request.every(),
 				Date.valueOf(valid.start()),
-				Date.valueOf(nextOnOrAfter(valid.start(), request.frequency(), today(userId))), now, now);
+				Date.valueOf(nextOnOrAfter(valid.start(), request.unit(), request.every(), today(userId))), now, now);
 		runOne(id);
 		return one(userId, id);
 	}
@@ -101,13 +106,13 @@ public class WalletRecurring {
 	/** Full replace; the next date is calculated again. @throws ApiException 404, 400 */
 	@Transactional
 	public Recurring update(UUID userId, UUID id, RecurringRequest request) {
-		mine(userId, id);
-		Valid valid = check(userId, request);
-		this.jdbc.update("UPDATE wallet_recurring SET name = ?, type = ?, amount = ?, currency = ?, category_id = ?, "
-				+ "description = ?, frequency = ?, start_date = ?, next_date = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-				request.name(), request.type(), valid.amount(), request.currency(), request.categoryId(),
-				request.description(), request.frequency(), Date.valueOf(valid.start()),
-				Date.valueOf(nextOnOrAfter(valid.start(), request.frequency(), today(userId))),
+		Row existing = mine(userId, id);
+		Valid valid = check(userId, request, existing);
+		this.jdbc.update("UPDATE wallet_recurring SET name = ?, type = ?, amount = ?, category_id = ?, "
+				+ "description = ?, repeat_unit = ?, repeat_every = ?, start_date = ?, next_date = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+				request.name(), request.type(), valid.amount(), request.categoryId(),
+				request.description(), request.unit(), request.every(), Date.valueOf(valid.start()),
+				Date.valueOf(nextOnOrAfter(valid.start(), request.unit(), request.every(), from(existing, userId))),
 				Timestamp.from(this.clock.instant()), id, userId);
 		runOne(id);
 		return one(userId, id);
@@ -128,17 +133,92 @@ public class WalletRecurring {
 	@Transactional
 	public Recurring setActive(UUID userId, UUID id, boolean active) {
 		Row row = mine(userId, id);
-		if (active && !row.active()) {
-			this.jdbc.update("UPDATE wallet_recurring SET active = true, next_date = ?, updated_at = ? WHERE id = ?",
-					Date.valueOf(nextOnOrAfter(row.startDate(), row.frequency(), today(userId))),
+		boolean pausedUntil = row.pausedUntil() != null && row.pausedUntil().isAfter(today(userId));
+		if (active && (!row.active() || pausedUntil)) {
+			this.jdbc.update("UPDATE wallet_recurring SET active = true, paused_until = NULL, next_date = ?, "
+					+ "updated_at = ? WHERE id = ?",
+					Date.valueOf(nextOnOrAfter(row.startDate(), row.unit(), row.every(), today(userId))),
 					Timestamp.from(this.clock.instant()), id);
 			runOne(id);
 		}
-		else if (!active && row.active()) {
-			this.jdbc.update("UPDATE wallet_recurring SET active = false, updated_at = ? WHERE id = ?",
+		else if (!active && (row.active() || row.pausedUntil() != null)) {
+			this.jdbc.update("UPDATE wallet_recurring SET active = false, paused_until = NULL, updated_at = ? WHERE id = ?",
 					Timestamp.from(this.clock.instant()), id);
 		}
 		return one(userId, id);
+	}
+
+	/**
+	 * Pause until a date: no transaction before it; from that date the series goes on
+	 * by itself.
+	 * @throws ApiException 404 {@code recurring_not_found}, 400 {@code validation_error}
+	 * (not after today)
+	 */
+	@Transactional
+	public Recurring pauseUntil(UUID userId, UUID id, String dateText) {
+		Row row = mine(userId, id);
+		LocalDate date = Recurrence.parseDate(dateText);
+		if (!date.isAfter(today(userId))) {
+			throw new ApiException(HttpStatus.BAD_REQUEST, "validation_error", "date: must be after today");
+		}
+		this.jdbc.update("UPDATE wallet_recurring SET active = true, paused_until = ?, next_date = ?, updated_at = ? "
+				+ "WHERE id = ?", Date.valueOf(date),
+				Date.valueOf(nextOnOrAfter(row.startDate(), row.unit(), row.every(), date)),
+				Timestamp.from(this.clock.instant()), id);
+		return one(userId, id);
+	}
+
+	/**
+	 * Skip one date of the series: its transaction is not made; the next ones are normal.
+	 * @throws ApiException 404 {@code recurring_not_found}, 400 {@code validation_error}
+	 * (not a date of the series, or in the past), 409 {@code already_created}
+	 */
+	@Transactional
+	public Recurring skip(UUID userId, UUID id, String dateText) {
+		Row row = mine(userId, id);
+		LocalDate date = Recurrence.parseDate(dateText);
+		if (!Recurrence.isSeriesDate(row.startDate(), row.unit(), row.every(), date)) {
+			throw new ApiException(HttpStatus.BAD_REQUEST, "validation_error", "date: not a date of this series");
+		}
+		if (date.isBefore(today(userId))) {
+			throw new ApiException(HttpStatus.BAD_REQUEST, "validation_error", "date: must be today or later");
+		}
+		Boolean made = this.jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM wallet_transactions WHERE "
+				+ "recurring_id = ? AND recurring_date = ?)", Boolean.class, id, Date.valueOf(date));
+		if (Boolean.TRUE.equals(made)) {
+			throw new ApiException(HttpStatus.CONFLICT, "already_created",
+					"This one was already added to your wallet (delete that transaction instead)");
+		}
+		this.jdbc.update("INSERT INTO wallet_recurring_skips (recurring_id, skip_date, created_at) VALUES (?, ?, ?) "
+				+ "ON CONFLICT DO NOTHING", id, Date.valueOf(date), Timestamp.from(this.clock.instant()));
+		return one(userId, id);
+	}
+
+	/**
+	 * Undo a skip, before its date.
+	 * @throws ApiException 404 {@code recurring_not_found}, 409 {@code too_late}
+	 */
+	@Transactional
+	public Recurring unskip(UUID userId, UUID id, String dateText) {
+		mine(userId, id);
+		LocalDate date = Recurrence.parseDate(dateText);
+		if (!date.isAfter(today(userId))) {
+			throw new ApiException(HttpStatus.CONFLICT, "too_late", "A skip can be undone only before its date");
+		}
+		this.jdbc.update("DELETE FROM wallet_recurring_skips WHERE recurring_id = ? AND skip_date = ?", id,
+				Date.valueOf(date));
+		return one(userId, id);
+	}
+
+	private java.util.Set<LocalDate> skips(UUID id) {
+		return new java.util.HashSet<>(this.jdbc.queryForList(
+				"SELECT skip_date FROM wallet_recurring_skips WHERE recurring_id = ?", LocalDate.class, id));
+	}
+
+	/** Dates are calculated from today, or from the "paused until" date while it is in the future. */
+	private LocalDate from(Row row, UUID userId) {
+		LocalDate today = today(userId);
+		return (row.pausedUntil() != null && row.pausedUntil().isAfter(today)) ? row.pausedUntil() : today;
 	}
 
 	/**
@@ -173,14 +253,19 @@ public class WalletRecurring {
 		}
 		LocalDate today = today(row.userId());
 		LocalDate next = row.nextDate();
+		java.util.Set<LocalDate> skips = skips(id);
 		int created = 0;
 		for (int i = 0; i < MAX_CATCH_UP && !next.isAfter(today); i++) {
+			if (skips.contains(next)) {
+				next = nextOnOrAfter(row.startDate(), row.unit(), row.every(), next.plusDays(1));
+				continue;
+			}
 			UUID txId = UUID.randomUUID();
-			int inserted = this.jdbc.update("INSERT INTO wallet_transactions (id, user_id, type, amount, currency, date, "
+			int inserted = this.jdbc.update("INSERT INTO wallet_transactions (id, user_id, type, amount, date, "
 					+ "description, category_id, recurring_id, recurring_date, created_at) "
-					+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+					+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
 					+ "ON CONFLICT (recurring_id, recurring_date) WHERE recurring_id IS NOT NULL DO NOTHING", txId,
-					row.userId(), row.type(), row.amount(), row.currency(), Date.valueOf(next), row.description(),
+					row.userId(), row.type(), row.amount(), Date.valueOf(next), row.description(),
 					row.categoryId(), row.id(), Date.valueOf(next), Timestamp.from(this.clock.instant()));
 			if (inserted > 0) {
 				created++;
@@ -188,12 +273,14 @@ public class WalletRecurring {
 						"\"" + row.name() + "\" was added to your wallet for " + next + ".", "/wallet/transactions/" + txId,
 						"recurring:" + row.id() + ":" + next + ":created");
 			}
-			next = nextOnOrAfter(row.startDate(), row.frequency(), next.plusDays(1));
+			next = nextOnOrAfter(row.startDate(), row.unit(), row.every(), next.plusDays(1));
 		}
 		if (!next.equals(row.nextDate())) {
 			this.jdbc.update("UPDATE wallet_recurring SET next_date = ? WHERE id = ?", Date.valueOf(next), id);
 		}
-		if (next.equals(today.plusDays(1))) {
+		LocalDate coming = Recurrence.nextNotSkipped(row.startDate(), row.unit(), row.every(), next, null, skips);
+		if (coming.equals(today.plusDays(1))) {
+			next = coming;
 			this.alerts.add(row.userId(), AlertService.RECURRING_DUE_TOMORROW, "Recurring item tomorrow",
 					"\"" + row.name() + "\" will be added to your wallet tomorrow.", "/wallet/recurring",
 					"recurring:" + row.id() + ":" + next + ":due");
@@ -204,38 +291,18 @@ public class WalletRecurring {
 		return created;
 	}
 
-	/** The first date of the series on or after {@code date}. A 31st falls on the last day of short months. */
-	static LocalDate nextOnOrAfter(LocalDate start, String frequency, LocalDate date) {
-		if (!start.isBefore(date)) {
-			return start;
-		}
-		long k = switch (frequency) {
-			case "WEEKLY" -> Math.max(0, java.time.temporal.ChronoUnit.WEEKS.between(start, date) - 1);
-			case "MONTHLY" -> Math.max(0, java.time.temporal.ChronoUnit.MONTHS.between(start, date) - 1);
-			default -> Math.max(0, java.time.temporal.ChronoUnit.YEARS.between(start, date) - 1);
-		};
-		LocalDate candidate = occurrence(start, frequency, k);
-		while (candidate.isBefore(date)) {
-			k++;
-			candidate = occurrence(start, frequency, k);
-		}
-		return candidate;
-	}
-
-	private static LocalDate occurrence(LocalDate start, String frequency, long k) {
-		return switch (frequency) {
-			case "WEEKLY" -> start.plusWeeks(k);
-			case "MONTHLY" -> start.plusMonths(k);
-			default -> start.plusYears(k);
-		};
+	/** The first date of the series on or after {@code date} (see {@link Recurrence}). */
+	static LocalDate nextOnOrAfter(LocalDate start, String unit, int every, LocalDate date) {
+		return Recurrence.nextOnOrAfter(start, unit, every, date);
 	}
 
 	private LocalDate today(UUID userId) {
 		return LocalDate.now(this.clock.withZone(this.zones.saved(userId).orElse(ZoneOffset.UTC)));
 	}
 
-	private Valid check(UUID userId, RecurringRequest request) {
+	private Valid check(UUID userId, RecurringRequest request, Row existing) {
 		BigDecimal amount = Money.parse("amount", request.amount());
+		Recurrence.check(request.unit(), request.every());
 		LocalDate start;
 		try {
 			start = LocalDate.parse(request.startDate());
@@ -249,6 +316,11 @@ public class WalletRecurring {
 		if (!this.categories.isPickable(userId, category)) {
 			throw new ApiException(HttpStatus.BAD_REQUEST, "validation_error",
 					"categoryId: this category (or its parent) is archived");
+		}
+		boolean same = existing != null && existing.categoryId().equals(category.id())
+				&& existing.type().equals(request.type());
+		if (!same) {
+			CategoryKinds.checkFits(category.kind(), request.type());
 		}
 		return new Valid(amount, start);
 	}
@@ -267,30 +339,57 @@ public class WalletRecurring {
 
 	private Recurring view(UUID userId, Row row) {
 		CategoryRef category = this.categories.find(userId, row.categoryId())
-			.map((c) -> new CategoryRef(c.id(), c.name(), c.icon(), c.archived(), c.parentId()))
+			.map((c) -> new CategoryRef(c.id(), c.name(), c.icon(), c.archived(), c.parentId(), c.kind()))
 			.orElse(null);
-		return new Recurring(row.id(), row.name(), row.type(), Totals.money(row.amount()), row.currency(), category,
-				row.description(), row.frequency(), row.startDate(), row.nextDate(), row.active());
+		LocalDate today = today(userId);
+		java.util.Set<LocalDate> skips = skips(row.id());
+		LocalDate pausedUntil = (row.pausedUntil() != null && row.pausedUntil().isAfter(today)) ? row.pausedUntil()
+				: null;
+		LocalDate nextDate = Recurrence.nextNotSkipped(row.startDate(), row.unit(), row.every(), row.nextDate(), null,
+				skips);
+		java.util.Set<LocalDate> made = new java.util.HashSet<>(this.jdbc.queryForList(
+				"SELECT recurring_date FROM wallet_transactions WHERE recurring_id = ? AND recurring_date >= ?",
+				LocalDate.class, row.id(), Date.valueOf(today)));
+		List<Recurrence.Upcoming> upcoming = Recurrence
+			.dates(row.startDate(), row.unit(), row.every(), today, null, UPCOMING_COUNT)
+			.stream()
+			.map((date) -> new Recurrence.Upcoming(date, made.contains(date) ? "DONE" : skips.contains(date) ? "SKIPPED"
+					: (!row.active() || (pausedUntil != null && date.isBefore(pausedUntil))) ? "PAUSED" : "UPCOMING"))
+			.toList();
+		return new Recurring(row.id(), row.name(), row.type(), Totals.money(row.amount()), category,
+				row.description(), row.unit(), row.every(), row.startDate(), nextDate, row.active(), pausedUntil,
+				upcoming);
 	}
 
 	private static Row map(ResultSet rs, int rowNum) throws SQLException {
 		return new Row(rs.getObject("id", UUID.class), rs.getObject("user_id", UUID.class), rs.getString("name"),
-				rs.getString("type"), rs.getBigDecimal("amount"), rs.getString("currency"),
-				rs.getObject("category_id", UUID.class), rs.getString("description"), rs.getString("frequency"),
-				rs.getDate("start_date").toLocalDate(), rs.getDate("next_date").toLocalDate(), rs.getBoolean("active"));
+				rs.getString("type"), rs.getBigDecimal("amount"),
+				rs.getObject("category_id", UUID.class), rs.getString("description"), rs.getString("repeat_unit"),
+				rs.getInt("repeat_every"),
+				rs.getDate("start_date").toLocalDate(), rs.getDate("next_date").toLocalDate(), rs.getBoolean("active"),
+				(rs.getDate("paused_until") != null) ? rs.getDate("paused_until").toLocalDate() : null);
 	}
 
 	private record Valid(BigDecimal amount, LocalDate start) {
 	}
 
-	private record Row(UUID id, UUID userId, String name, String type, BigDecimal amount, String currency,
-			UUID categoryId, String description, String frequency, LocalDate startDate, LocalDate nextDate,
-			boolean active) {
+	private record Row(UUID id, UUID userId, String name, String type, BigDecimal amount,
+			UUID categoryId, String description, String unit, int every, LocalDate startDate, LocalDate nextDate,
+			boolean active, LocalDate pausedUntil) {
 	}
 
-	/** A recurring item as the API returns it. */
-	public record Recurring(UUID id, String name, String type, String amount, String currency, CategoryRef category,
-			String description, String frequency, LocalDate startDate, LocalDate nextDate, boolean active) {
+	/**
+	 * A recurring item as the API returns it.
+	 * @param unit DAY, WEEK, MONTH or YEAR
+	 * @param every every N units (MONTH/3 = every 3 months)
+	 * @param nextDate the next date that will be made (skipped dates left out)
+	 * @param active false = paused with no end (Resume to go on)
+	 * @param pausedUntil paused until this date (then it goes on by itself), or null
+	 * @param upcoming the next 6 dates from today with their status
+	 */
+	public record Recurring(UUID id, String name, String type, String amount, CategoryRef category,
+			String description, String unit, int every, LocalDate startDate, LocalDate nextDate, boolean active,
+			LocalDate pausedUntil, List<Recurrence.Upcoming> upcoming) {
 	}
 
 	/** Body of POST and PUT /api/wallet/recurring. Texts are trimmed before validation. */
@@ -299,12 +398,13 @@ public class WalletRecurring {
 					message = "must not contain control characters") String name,
 			@NotNull @Pattern(regexp = "EXPENSE|INCOME", message = "must be EXPENSE or INCOME") String type,
 			@NotNull String amount,
-			@NotNull @Pattern(regexp = "USD|MAD", message = "must be USD or MAD") String currency,
 			@NotNull UUID categoryId,
 			@NotBlank @Size(max = 200) @Pattern(regexp = Names.NO_CONTROL_CHARS,
 					message = "must not contain control characters") String description,
-			@NotNull @Pattern(regexp = "WEEKLY|MONTHLY|YEARLY", message = "must be WEEKLY, MONTHLY or YEARLY")
-			String frequency,
+			@NotNull @Pattern(regexp = Recurrence.UNITS, message = "must be DAY, WEEK, MONTH or YEAR")
+			@io.swagger.v3.oas.annotations.media.Schema(allowableValues = { "DAY", "WEEK", "MONTH", "YEAR" }) String unit,
+			@NotNull @io.swagger.v3.oas.annotations.media.Schema(description = "Every N units: DAY 1-365, WEEK 1-52, "
+					+ "MONTH 1-24, YEAR 1-5", example = "1") Integer every,
 			@NotNull @Pattern(regexp = "[0-9]{4}-[0-9]{2}-[0-9]{2}", message = "must be like 2026-03-31")
 			String startDate) {
 

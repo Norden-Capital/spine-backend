@@ -20,8 +20,8 @@ import org.springframework.http.HttpStatus;
  * @param q lower-case text to look for (null = no text filter)
  * @param page 0-based
  */
-public record ListFilter(LocalDate from, LocalDate to, String q, Set<UUID> categoryIds, Set<UUID> tagIds, String type,
-		String currency, UUID createdBy, BigDecimal minAmount, BigDecimal maxAmount, int page, int size) {
+public record ListFilter(LocalDate from, LocalDate to, String q, Set<UUID> categoryIds, String type,
+		UUID createdBy, BigDecimal minAmount, BigDecimal maxAmount, int page, int size) {
 
 	public static final int DEFAULT_SIZE = 50;
 
@@ -50,7 +50,6 @@ public record ListFilter(LocalDate from, LocalDate to, String q, Set<UUID> categ
 			throw invalid("q: at most 200 characters");
 		}
 		String type = choice("type", raw.type(), "EXPENSE", "INCOME");
-		String currency = choice("currency", raw.currency(), "USD", "MAD");
 		UUID createdBy = (raw.createdBy() != null && !raw.createdBy().isBlank()) ? uuid("createdBy", raw.createdBy())
 				: null;
 		BigDecimal min = money("minAmount", raw.minAmount());
@@ -59,9 +58,9 @@ public record ListFilter(LocalDate from, LocalDate to, String q, Set<UUID> categ
 			throw invalid("minAmount: must not be more than maxAmount");
 		}
 		int page = number("page", raw.page(), 0, 0, Integer.MAX_VALUE);
-		int size = number("size", raw.size(), DEFAULT_SIZE, 1, MAX_SIZE);
-		return new ListFilter(from, to, q, uuids("categoryIds", raw.categoryIds()), uuids("tagIds", raw.tagIds()), type,
-				currency, createdBy, min, max, page, size);
+		// size=0: only totalItems and totals (no items), for a live "Show N results".
+		int size = number("size", raw.size(), DEFAULT_SIZE, 0, MAX_SIZE);
+		return new ListFilter(from, to, q, uuids("categoryIds", raw.categoryIds()), type, createdBy, min, max, page, size);
 	}
 
 	private static LocalDate date(String field, String value) {
@@ -155,8 +154,7 @@ public record ListFilter(LocalDate from, LocalDate to, String q, Set<UUID> categ
 	}
 
 	/** The raw query parameters, as sent. */
-	public record Params(String from, String to, String month, String q, List<String> categoryIds,
-			List<String> tagIds, String type, String currency, String createdBy, String minAmount, String maxAmount,
+	public record Params(String from, String to, String month, String q, List<String> categoryIds, String type, String createdBy, String minAmount, String maxAmount,
 			String page, String size) {
 	}
 

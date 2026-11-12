@@ -47,9 +47,9 @@ public class WalletGoals {
 	@Transactional(readOnly = true)
 	public List<Goal> list(UUID userId) {
 		List<Object[]> goals = this.jdbc.query(
-				"SELECT id, name, target, currency, deadline FROM wallet_goals WHERE user_id = ? ORDER BY created_at, id",
+				"SELECT id, name, target, deadline FROM wallet_goals WHERE user_id = ? ORDER BY created_at, id",
 				(rs, row) -> new Object[] { rs.getObject("id", UUID.class), rs.getString("name"),
-						rs.getBigDecimal("target"), rs.getString("currency"),
+						rs.getBigDecimal("target"),
 						(rs.getDate("deadline") != null) ? rs.getDate("deadline").toLocalDate() : null },
 				userId);
 		Map<UUID, List<Contribution>> contributions = new HashMap<>();
@@ -69,7 +69,7 @@ public class WalletGoals {
 			BigDecimal target = (BigDecimal) g[2];
 			BigDecimal total = saved.getOrDefault(id, BigDecimal.ZERO);
 			int percent = total.multiply(BigDecimal.valueOf(100)).divide(target, 0, RoundingMode.FLOOR).intValue();
-			return new Goal(id, (String) g[1], Totals.money(target), (String) g[3], (LocalDate) g[4],
+			return new Goal(id, (String) g[1], Totals.money(target), (LocalDate) g[3],
 					Totals.money(total), percent, contributions.getOrDefault(id, List.of()));
 		}).toList();
 	}
@@ -80,8 +80,8 @@ public class WalletGoals {
 		BigDecimal target = Money.parse("target", request.target());
 		UUID id = UUID.randomUUID();
 		Timestamp now = Timestamp.from(this.clock.instant());
-		this.jdbc.update("INSERT INTO wallet_goals (id, user_id, name, target, currency, deadline, created_at, updated_at) "
-				+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", id, userId, request.name(), target, request.currency(),
+		this.jdbc.update("INSERT INTO wallet_goals (id, user_id, name, target, deadline, created_at, updated_at) "
+				+ "VALUES (?, ?, ?, ?, ?, ?, ?)", id, userId, request.name(), target,
 				date("deadline", request.deadline()), now, now);
 		return one(userId, id);
 	}
@@ -91,8 +91,8 @@ public class WalletGoals {
 	public Goal update(UUID userId, UUID id, GoalRequest request) {
 		mine(userId, id);
 		BigDecimal target = Money.parse("target", request.target());
-		this.jdbc.update("UPDATE wallet_goals SET name = ?, target = ?, currency = ?, deadline = ?, updated_at = ? "
-				+ "WHERE id = ? AND user_id = ?", request.name(), target, request.currency(),
+		this.jdbc.update("UPDATE wallet_goals SET name = ?, target = ?, deadline = ?, updated_at = ? "
+				+ "WHERE id = ? AND user_id = ?", request.name(), target,
 				date("deadline", request.deadline()), Timestamp.from(this.clock.instant()), id, userId);
 		return one(userId, id);
 	}
@@ -164,7 +164,7 @@ public class WalletGoals {
 	 * @param percent whole number, can be over 100
 	 * @param contributions newest first
 	 */
-	public record Goal(UUID id, String name, String target, String currency, LocalDate deadline, String saved,
+	public record Goal(UUID id, String name, String target, LocalDate deadline, String saved,
 			int percent, List<Contribution> contributions) {
 	}
 
@@ -176,7 +176,6 @@ public class WalletGoals {
 			@NotBlank @Size(max = 60) @Pattern(regexp = Names.NO_CONTROL_CHARS,
 					message = "must not contain control characters") String name,
 			@NotNull String target,
-			@NotNull @Pattern(regexp = "USD|MAD", message = "must be USD or MAD") String currency,
 			@Pattern(regexp = "[0-9]{4}-[0-9]{2}-[0-9]{2}", message = "must be like 2026-12-31") String deadline) {
 
 		public GoalRequest {

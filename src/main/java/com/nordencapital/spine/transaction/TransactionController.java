@@ -29,7 +29,7 @@ import com.nordencapital.spine.common.ListFilter;
 import com.nordencapital.spine.common.ListPage;
 
 @Tag(name = "Transactions", description = "Company transactions, shared: every logged-in user sees and edits all. "
-		+ "Delete moves to the trash (its creator, OWNER, ADMIN); restore is OWNER/ADMIN. Every write needs the "
+		+ "Change and delete (to the trash): its creator or the OWNER; restore is OWNER. Every write needs the "
 		+ "X-XSRF-TOKEN header.")
 @RestController
 public class TransactionController {
@@ -55,13 +55,12 @@ public class TransactionController {
 			@Parameter(description = "Text in the description or a comment") @RequestParam(required = false) String q,
 			@Parameter(description = "Category ids (a parent includes its children)") @RequestParam(
 					required = false) List<String> categoryIds,
-			@Parameter(description = "Tag ids (any of them)") @RequestParam(required = false) List<String> tagIds,
-			@RequestParam(required = false) String type, @RequestParam(required = false) String currency,
-			@Parameter(description = "User id") @RequestParam(required = false) String createdBy,
+			@RequestParam(required = false) String type,
+			@Parameter(description = "User id (OWNER only, else 403)") @RequestParam(required = false) String createdBy,
 			@RequestParam(required = false) String minAmount, @RequestParam(required = false) String maxAmount,
 			@Parameter(description = "0-based, default 0") @RequestParam(required = false) String page,
 			@Parameter(description = "Default 50, max 100") @RequestParam(required = false) String size) {
-		return this.service.list(actor, new ListFilter.Params(from, to, month, q, categoryIds, tagIds, type, currency,
+		return this.service.list(actor, new ListFilter.Params(from, to, month, q, categoryIds, type,
 				createdBy, minAmount, maxAmount, page, size));
 	}
 
@@ -98,7 +97,7 @@ public class TransactionController {
 		return this.service.update(actor, id, body);
 	}
 
-	@Operation(summary = "Move a transaction to the trash", description = "Its creator, OWNER or ADMIN.")
+	@Operation(summary = "Move a transaction to the trash", description = "Its creator or the OWNER.")
 	@ApiResponse(responseCode = "204", description = "In the trash")
 	@ApiResponse(responseCode = "403", description = "forbidden",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
@@ -119,13 +118,13 @@ public class TransactionController {
 		return this.service.history(actor, id);
 	}
 
-	@Operation(summary = "The trash (OWNER and ADMIN)", description = "Last trashed first.")
+	@Operation(summary = "The trash (OWNER)", description = "Last trashed first.")
 	@GetMapping("/api/admin/transactions/trash")
 	public List<TrashedTransactionResponse> trashList(@AuthenticationPrincipal AuthUser actor) {
 		return this.service.trashList(actor);
 	}
 
-	@Operation(summary = "Restore from the trash (OWNER and ADMIN)")
+	@Operation(summary = "Restore from the trash (OWNER)")
 	@ApiResponse(responseCode = "200", description = "Restored")
 	@ApiResponse(responseCode = "404", description = "transaction_not_found",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))

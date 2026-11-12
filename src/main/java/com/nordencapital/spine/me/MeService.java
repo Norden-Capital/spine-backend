@@ -66,6 +66,16 @@ public class MeService {
 		return this.loginEvents.previousSuccess(user.getId(), sessionLoginAt);
 	}
 
+	/**
+	 * Sets my face seed (checked by the controller), or null = back to the default.
+	 */
+	@Transactional
+	public User setAvatar(AuthUser principal, String seed) {
+		User user = activeUser(principal);
+		user.setAvatarSeed(seed, this.clock.instant());
+		return user;
+	}
+
 	@Transactional(readOnly = true)
 	public User profile(AuthUser principal) {
 		return activeUser(principal);

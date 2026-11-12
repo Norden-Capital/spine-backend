@@ -24,7 +24,7 @@ class FilesIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void allowedTypesAreFoundByContentNotByHeader() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 
 		assertUploaded(client.upload("a.jpg", "image/jpeg", TestFiles.JPEG), "image/jpeg");
@@ -40,7 +40,7 @@ class FilesIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void otherTypesAreRefused() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 
 		assertError(client.upload("photo.jpg", "image/jpeg", TestFiles.TEXT), HttpStatus.UNSUPPORTED_MEDIA_TYPE,
@@ -54,7 +54,7 @@ class FilesIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void tooBigFileIsRefused() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		byte[] big = new byte[(int) FileService.MAX_SIZE + 1];
 		System.arraycopy(TestFiles.PDF, 0, big, 0, TestFiles.PDF.length);
 		assertError(loggedIn("emp@example.com").upload("big.pdf", "application/pdf", big), HttpStatus.PAYLOAD_TOO_LARGE,
@@ -68,7 +68,7 @@ class FilesIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void namesAreCleanedAndDiskNamesAreRandom() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		MvcTestResult result = loggedIn("emp@example.com").upload("../../etc/receipt\u0007.pdf", "application/pdf",
 				TestFiles.PDF);
 		assertThat(result).bodyJson().extractingPath("$.name").isEqualTo("receipt.pdf");
@@ -79,8 +79,8 @@ class FilesIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void newUploadIsOnlyForItsOwner() throws Exception {
-		activeUser("emp@example.com", Role.EMPLOYEE);
-		activeUser("admin@example.com", Role.ADMIN);
+		activeUser("emp@example.com", Role.MEMBER);
+		activeUser("admin@example.com", Role.OWNER);
 		Client owner = loggedIn("emp@example.com");
 		String id = uploadedId(owner.upload("r.pdf", "application/pdf", TestFiles.PDF));
 
@@ -104,7 +104,7 @@ class FilesIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void oldUnattachedUploadsAreDeleted() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 		String old = uploadedId(client.upload("old.pdf", "application/pdf", TestFiles.PDF));
 		String fresh = uploadedId(client.upload("fresh.pdf", "application/pdf", TestFiles.PDF));

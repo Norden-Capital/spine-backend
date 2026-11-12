@@ -22,7 +22,7 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void registrationOptionsAskForAResidentKeyAndUserVerification() {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		MvcTestResult options = loggedIn("emp@example.com").post("/api/me/passkeys/register/options", "");
 		assertThat(options).hasStatus(HttpStatus.OK);
 		assertThat(options).bodyJson().extractingPath("$.rp.id").isEqualTo("localhost");
@@ -39,7 +39,7 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void addListRenameDeleteMyPasskey() throws Exception {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 		FakeAuthenticator phone = new FakeAuthenticator(ORIGIN);
 
@@ -67,7 +67,7 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void defaultNameIsPasskey() throws Exception {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 		assertThat(register(client, new FakeAuthenticator(ORIGIN), null)).bodyJson()
 			.extractingPath("$.name")
@@ -76,7 +76,7 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void registrationNeedsFreshOptionsAndTheRightOrigin() throws Exception {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 
 		// No options asked first.
@@ -107,7 +107,7 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void loginWithPasskeyStartsANormalSession() throws Exception {
-		User user = activeUser("emp@example.com", Role.EMPLOYEE);
+		User user = activeUser("emp@example.com", Role.MEMBER);
 		FakeAuthenticator phone = new FakeAuthenticator(ORIGIN);
 		register(loggedIn("emp@example.com"), phone, "iPhone");
 		this.jdbc.update("DELETE FROM login_events");
@@ -122,7 +122,7 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 		assertThat(login).hasStatus(HttpStatus.OK);
 		assertThat(login).bodyJson().extractingPath("$.id").isEqualTo(user.getId().toString());
 		assertThat(login).bodyJson().extractingPath("$.email").isEqualTo("emp@example.com");
-		assertThat(login).bodyJson().extractingPath("$.role").isEqualTo("EMPLOYEE");
+		assertThat(login).bodyJson().extractingPath("$.role").isEqualTo("MEMBER");
 		assertThat(login).bodyJson().extractingPath("$.firstName").isNull();
 		assertThat(browser.cookie("SESSION")).isNotNull().isNotEqualTo(sessionBefore);
 		assertThat(browser.cookie("XSRF-TOKEN")).isNotNull().isNotEqualTo(csrfBefore);
@@ -143,7 +143,7 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void currentMarksOnlyThePasskeyUsedForThisSession() throws Exception {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		FakeAuthenticator phone = new FakeAuthenticator(ORIGIN);
 		FakeAuthenticator laptop = new FakeAuthenticator(ORIGIN);
 		Client byPassword = loggedIn("emp@example.com");
@@ -174,7 +174,7 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void disabledUserCannotLogInWithPasskey() throws Exception {
-		User user = activeUser("emp@example.com", Role.EMPLOYEE);
+		User user = activeUser("emp@example.com", Role.MEMBER);
 		FakeAuthenticator phone = new FakeAuthenticator(ORIGIN);
 		register(loggedIn("emp@example.com"), phone, "iPhone");
 		this.jdbc.update("DELETE FROM login_events");
@@ -191,7 +191,7 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void badSignatureOrUnknownPasskeyIsRefused() throws Exception {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		FakeAuthenticator phone = new FakeAuthenticator(ORIGIN);
 		register(loggedIn("emp@example.com"), phone, "iPhone");
 		this.jdbc.update("DELETE FROM login_events");
@@ -222,7 +222,7 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void tooManyFailedPasskeyLoginsAreBlocked() throws Exception {
-		activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
 		FakeAuthenticator phone = new FakeAuthenticator(ORIGIN);
 		register(loggedIn("emp@example.com"), phone, "iPhone");
 
@@ -240,8 +240,8 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void passkeysAreOwnDataOnly() throws Exception {
-		activeUser("emp@example.com", Role.EMPLOYEE);
-		activeUser("other@example.com", Role.EMPLOYEE);
+		activeUser("emp@example.com", Role.MEMBER);
+		activeUser("other@example.com", Role.MEMBER);
 		register(loggedIn("emp@example.com"), new FakeAuthenticator(ORIGIN), "Mine");
 		String id = this.jdbc.queryForObject("SELECT id FROM passkeys", String.class);
 		Client other = loggedIn("other@example.com");
@@ -264,8 +264,8 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 
 	@Test
 	void adminSeesOnlyThePasskeyCount() throws Exception {
-		activeUser("admin@example.com", Role.ADMIN);
-		User employee = activeUser("emp@example.com", Role.EMPLOYEE);
+		activeUser("admin@example.com", Role.OWNER);
+		User employee = activeUser("emp@example.com", Role.MEMBER);
 		Client emp = loggedIn("emp@example.com");
 		register(emp, new FakeAuthenticator(ORIGIN), "Phone");
 		register(emp, new FakeAuthenticator(ORIGIN), "Laptop");

@@ -26,7 +26,7 @@ import com.nordencapital.spine.me.UserZones;
 import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
 
 /**
- * Monthly budgets: a limit per currency, either for everything (no category) or for one
+ * Monthly budgets (USD): a limit, either for everything (no category) or for one
  * category and its subcategories. Alerts at 80% and 100%, once per budget per month.
  */
 @Component
@@ -65,8 +65,8 @@ public class WalletBudgets {
 			WalletCategories.Category category = (row.categoryId() != null) ? categoriesById.get(row.categoryId())
 					: null;
 			CategoryRef ref = (category != null) ? new CategoryRef(category.id(), category.name(), category.icon(),
-					category.archived(), category.parentId()) : null;
-			return new Budget(row.id(), row.currency(), Totals.money(row.limit()), ref, Totals.money(spent), percent,
+					category.archived(), category.parentId(), category.kind()) : null;
+			return new Budget(row.id(), Totals.money(row.limit()), ref, Totals.money(spent), percent,
 					status);
 		}).toList();
 	}
@@ -81,8 +81,8 @@ public class WalletBudgets {
 		UUID id = UUID.randomUUID();
 		Timestamp now = Timestamp.from(this.clock.instant());
 		try {
-			this.jdbc.update("INSERT INTO wallet_budgets (id, user_id, currency, amount, category_id, created_at, "
-					+ "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", id, userId, request.currency(), limit,
+			this.jdbc.update("INSERT INTO wallet_budgets (id, user_id, amount, category_id, created_at, "
+					+ "updated_at) VALUES (?, ?, ?, ?, ?, ?)", id, userId, limit,
 					request.categoryId(), now, now);
 		}
 		catch (DuplicateKeyException ex) {
@@ -99,8 +99,8 @@ public class WalletBudgets {
 		BigDecimal limit = Money.parse("limit", request.limit());
 		checkCategory(userId, request.categoryId());
 		try {
-			this.jdbc.update("UPDATE wallet_budgets SET currency = ?, amount = ?, category_id = ?, updated_at = ? "
-					+ "WHERE id = ? AND user_id = ?", request.currency(), limit, request.categoryId(),
+			this.jdbc.update("UPDATE wallet_budgets SET amount = ?, category_id = ?, updated_at = ? "
+					+ "WHERE id = ? AND user_id = ?", limit, request.categoryId(),
 					Timestamp.from(this.clock.instant()), id, userId);
 		}
 		catch (DuplicateKeyException ex) {
@@ -125,8 +125,7 @@ public class WalletBudgets {
 	public void checkAlerts(UUID userId) {
 		YearMonth month = thisMonth(userId);
 		for (Budget budget : list(userId)) {
-			String name = (budget.category() != null) ? budget.category().name() + " (" + budget.currency() + ")"
-					: "total " + budget.currency();
+			String name = (budget.category() != null) ? budget.category().name() : "total";
 			if (budget.percent() >= 80) {
 				this.alerts.add(userId, AlertService.BUDGET_80, "Budget almost used",
 						"You have used 80% of your " + name + " budget this month.",
@@ -163,23 +162,23 @@ public class WalletBudgets {
 		Object[] args;
 		if (row.categoryId() != null) {
 			categoryFilter = " AND (category_id = ? OR category_id IN (SELECT id FROM wallet_categories WHERE parent_id = ?))";
-			args = new Object[] { userId, row.currency(), Date.valueOf(month.atDay(1)),
+			args = new Object[] { userId, Date.valueOf(month.atDay(1)),
 					Date.valueOf(month.atEndOfMonth()), row.categoryId(), row.categoryId() };
 		}
 		else {
-			args = new Object[] { userId, row.currency(), Date.valueOf(month.atDay(1)),
+			args = new Object[] { userId, Date.valueOf(month.atDay(1)),
 					Date.valueOf(month.atEndOfMonth()) };
 		}
 		BigDecimal spent = this.jdbc.queryForObject("SELECT coalesce(sum(amount), 0) FROM wallet_transactions "
-				+ "WHERE user_id = ? AND type = 'EXPENSE' AND currency = ? AND date >= ? AND date <= ?" + categoryFilter,
+				+ "WHERE user_id = ? AND type = 'EXPENSE' AND date >= ? AND date <= ?" + categoryFilter,
 				BigDecimal.class, args);
 		return (spent != null) ? spent : BigDecimal.ZERO;
 	}
 
 	private List<Row> rows(UUID userId) {
 		return this.jdbc.query(
-				"SELECT id, currency, amount, category_id FROM wallet_budgets WHERE user_id = ? ORDER BY currency, created_at",
-				(rs, row) -> new Row(rs.getObject("id", UUID.class), rs.getString("currency"), rs.getBigDecimal("amount"),
+				"SELECT id, amount, category_id FROM wallet_budgets WHERE user_id = ? ORDER BY created_at",
+				(rs, row) -> new Row(rs.getObject("id", UUID.class), rs.getBigDecimal("amount"),
 						rs.getObject("category_id", UUID.class)),
 				userId);
 	}
@@ -190,25 +189,23 @@ public class WalletBudgets {
 
 	private static ApiException exists() {
 		return new ApiException(HttpStatus.CONFLICT, "budget_exists",
-				"You already have a budget for this currency and category");
+				"You already have a budget for this category");
 	}
 
-	private record Row(UUID id, String currency, BigDecimal limit, UUID categoryId) {
+	private record Row(UUID id, BigDecimal limit, UUID categoryId) {
 	}
 
 	/**
-	 * @param category null = total budget for the currency
+	 * @param category null = total budget
 	 * @param percent whole number, can be over 100
 	 * @param status OK (under 80), WARNING (80-99), EXCEEDED (100 or more)
 	 */
-	public record Budget(UUID id, String currency, String limit, CategoryRef category, String spent, int percent,
+	public record Budget(UUID id, String limit, CategoryRef category, String spent, int percent,
 			String status) {
 	}
 
 	/** Body of POST and PUT /api/wallet/budgets. */
 	public record BudgetRequest(
-			@jakarta.validation.constraints.NotNull @jakarta.validation.constraints.Pattern(regexp = "USD|MAD",
-					message = "must be USD or MAD") String currency,
 			@jakarta.validation.constraints.NotNull String limit, UUID categoryId) {
 	}
 

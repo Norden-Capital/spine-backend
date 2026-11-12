@@ -1,7 +1,7 @@
 package com.nordencapital.spine.common;
 
 /**
- * Short display names (categories, tags): trimmed, 1 to 40 characters, no control
+ * Short display names (categories): trimmed, 1 to 40 characters, no control
  * characters.
  */
 public final class Names {

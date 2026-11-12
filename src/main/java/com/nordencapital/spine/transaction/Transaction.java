@@ -3,16 +3,11 @@ package com.nordencapital.spine.transaction;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.util.HashSet;
-import java.util.Set;
 import java.util.UUID;
 
-import jakarta.persistence.CollectionTable;
 import jakarta.persistence.Column;
-import jakarta.persistence.ElementCollection;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
-import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Table;
 
 /**
@@ -32,8 +27,6 @@ public class Transaction {
 	@Column(nullable = false, precision = 14, scale = 2)
 	private BigDecimal amount;
 
-	@Column(nullable = false, length = 3)
-	private String currency;
 
 	@Column(nullable = false)
 	private LocalDate date;
@@ -47,10 +40,6 @@ public class Transaction {
 	@Column(name = "category_id", nullable = false)
 	private UUID categoryId;
 
-	@ElementCollection
-	@CollectionTable(name = "transaction_tags", joinColumns = @JoinColumn(name = "transaction_id"))
-	@Column(name = "tag_id")
-	private Set<UUID> tagIds = new HashSet<>();
 
 	@Column(name = "created_by", nullable = false)
 	private UUID createdBy;
@@ -101,13 +90,10 @@ public class Transaction {
 	private void apply(Values values) {
 		this.type = values.type();
 		this.amount = values.amount();
-		this.currency = values.currency();
 		this.date = values.date();
 		this.description = values.description();
 		this.website = values.website();
 		this.categoryId = values.categoryId();
-		this.tagIds.clear();
-		this.tagIds.addAll(values.tagIds());
 	}
 
 	public boolean isTrashed() {
@@ -126,10 +112,6 @@ public class Transaction {
 		return this.amount;
 	}
 
-	public String getCurrency() {
-		return this.currency;
-	}
-
 	public LocalDate getDate() {
 		return this.date;
 	}
@@ -145,10 +127,6 @@ public class Transaction {
 
 	public UUID getCategoryId() {
 		return this.categoryId;
-	}
-
-	public Set<UUID> getTagIds() {
-		return Set.copyOf(this.tagIds);
 	}
 
 	public UUID getCreatedBy() {
@@ -176,8 +154,8 @@ public class Transaction {
 	}
 
 	/** Checked values from a create or update request (files are kept on the files table). */
-	record Values(String type, BigDecimal amount, String currency, LocalDate date, String description,
-			String website, UUID categoryId, Set<UUID> tagIds) {
+	record Values(String type, BigDecimal amount, LocalDate date, String description,
+			String website, UUID categoryId) {
 	}
 
 }

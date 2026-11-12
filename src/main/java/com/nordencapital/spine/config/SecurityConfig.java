@@ -29,7 +29,7 @@ import org.springframework.session.web.http.DefaultCookieSerializer;
 
 /**
  * Deny by default. Public: ping, health, and the login / password endpoints.
- * {@code /api/admin/**} needs OWNER or ADMIN (finer rules in UserAccess). Everything else
+ * {@code /api/admin/**} needs OWNER (finer rules in UserAccess). Everything else
  * needs a logged-in user.
  * <p>
  * Sessions are server-side (Spring Session JDBC, SESSION cookie). CSRF is on for every
@@ -55,7 +55,7 @@ public class SecurityConfig {
 			// Swagger: only switched on by the local profile; 404 everywhere else.
 			.requestMatchers(HttpMethod.GET, "/v3/api-docs", "/v3/api-docs/**", "/swagger-ui.html", "/swagger-ui/**")
 			.permitAll()
-			.requestMatchers("/api/admin/**").hasAnyRole("OWNER", "ADMIN")
+			.requestMatchers("/api/admin/**").hasRole("OWNER")
 			.anyRequest().authenticated());
 
 		http.csrf((csrf) -> csrf.spa().csrfTokenRepository(csrfTokenRepository));

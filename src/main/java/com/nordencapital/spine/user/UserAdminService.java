@@ -99,15 +99,16 @@ public class UserAdminService {
 	}
 
 	/**
-	 * @throws ApiException 403 {@code forbidden} (role not allowed), 409
+	 * @throws ApiException 403 {@code forbidden} (not the owner), 409
 	 * {@code email_taken}
 	 */
 	@Transactional
-	public UserResponse invite(AuthUser principal, String email, Role role) {
+	public UserResponse invite(AuthUser principal, String email) {
 		User actor = actor(principal);
-		if (!UserAccess.canInvite(actor, role)) {
-			throw forbidden("You cannot invite a user with this role");
+		if (!UserAccess.canInvite(actor)) {
+			throw forbidden("Only the owner can invite");
 		}
+		Role role = Role.MEMBER;
 		String normalized = Emails.normalize(email);
 		if (this.users.existsByEmail(normalized)) {
 			throw emailTaken();
@@ -192,10 +193,10 @@ public class UserAdminService {
 	}
 
 	/**
-	 * The caller, loaded again. Only an ACTIVE OWNER or ADMIN may use this service.
+	 * The caller, loaded again. Only the ACTIVE OWNER may use this service.
 	 */
 	private User actor(AuthUser principal) {
-		return this.actors.manager(principal);
+		return this.actors.owner(principal);
 	}
 
 	private User visible(User actor, UUID id) {
