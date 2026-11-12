@@ -139,7 +139,8 @@ public class PasskeyService {
 	 * @throws ApiException 400 {@code passkey_invalid}
 	 */
 	@Transactional
-	public PasskeyResponse register(AuthUser principal, HttpSession session, String name, String credentialJson) {
+	public PasskeyResponse register(AuthUser principal, HttpSession session, String name, String credentialJson,
+			UUID loginPasskeyId) {
 		User user = this.actors.active(principal);
 		Pending pending = take(session, REGISTRATION_KEY)
 			.filter((p) -> p.userId().equals(user.getId()))
@@ -157,7 +158,7 @@ public class PasskeyService {
 			Passkey passkey = Passkey.create(user.getId(), result.getKeyId().getId().getBytes(),
 					result.getPublicKeyCose().getBytes(), result.getSignatureCount(), transports,
 					(name != null) ? name : DEFAULT_NAME, this.clock.instant());
-			return PasskeyResponse.from(this.passkeys.saveAndFlush(passkey));
+			return PasskeyResponse.from(this.passkeys.saveAndFlush(passkey), loginPasskeyId);
 		}
 		catch (IOException | RegistrationFailedException ex) {
 			logger.info("Passkey registration failed for user {}: {}", user.getId(), ex.getMessage());
@@ -169,11 +170,11 @@ public class PasskeyService {
 	}
 
 	@Transactional(readOnly = true)
-	public List<PasskeyResponse> list(AuthUser principal) {
+	public List<PasskeyResponse> list(AuthUser principal, UUID loginPasskeyId) {
 		User user = this.actors.active(principal);
 		return this.passkeys.findAllByUserIdOrderByCreatedAtAsc(user.getId())
 			.stream()
-			.map(PasskeyResponse::from)
+			.map((passkey) -> PasskeyResponse.from(passkey, loginPasskeyId))
 			.toList();
 	}
 
@@ -181,10 +182,10 @@ public class PasskeyService {
 	 * @throws ApiException 404 {@code passkey_not_found}
 	 */
 	@Transactional
-	public PasskeyResponse rename(AuthUser principal, UUID id, String name) {
+	public PasskeyResponse rename(AuthUser principal, UUID id, String name, UUID loginPasskeyId) {
 		Passkey passkey = mine(principal, id);
 		passkey.rename(name);
-		return PasskeyResponse.from(passkey);
+		return PasskeyResponse.from(passkey, loginPasskeyId);
 	}
 
 	/**
@@ -221,11 +222,11 @@ public class PasskeyService {
 	 * passkey is saved in the login history. The transaction is not rolled back by the
 	 * 401, so failed tries stay saved.
 	 * @param credentialJson AuthenticationResponseJSON from the browser
-	 * @return the logged-in user
+	 * @return the logged-in user and the passkey used
 	 * @throws ApiException 401 {@code passkey_invalid} or 429 {@code too_many_attempts}
 	 */
 	@Transactional(noRollbackFor = ApiException.class)
-	public User login(HttpSession session, String credentialJson, String clientIp) {
+	public LoggedIn login(HttpSession session, String credentialJson, String clientIp) {
 		String limitKey = "passkey|" + clientIp;
 		if (this.limiters.passkeyLogin().isBlocked(limitKey)) {
 			throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "too_many_attempts",
@@ -263,7 +264,11 @@ public class PasskeyService {
 		user.get().recordLogin(now);
 		this.loginEvents.record(knownUserId, true, clientIp, now);
 		this.limiters.passkeyLogin().reset(limitKey);
-		return user.get();
+		return new LoggedIn(user.get(), passkey.get().getId());
+	}
+
+	/** A passkey login: who, and with which passkey. */
+	public record LoggedIn(User user, UUID passkeyId) {
 	}
 
 	/** How many passkeys a user has (for the admin user page). */

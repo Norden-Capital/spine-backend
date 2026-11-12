@@ -36,10 +36,12 @@ import com.nordencapital.spine.common.ListPage;
 import com.nordencapital.spine.common.Money;
 import com.nordencapital.spine.common.Totals;
 import com.nordencapital.spine.common.TransactionSearch;
+import com.nordencapital.spine.common.Websites;
 import com.nordencapital.spine.file.FileResponse;
 import com.nordencapital.spine.file.FileService;
 import com.nordencapital.spine.file.StoredFile;
 import com.nordencapital.spine.file.StoredFileRepository;
+import com.nordencapital.spine.logo.LogoService;
 import com.nordencapital.spine.me.UserZones;
 import com.nordencapital.spine.transaction.TransactionRequest;
 import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
@@ -62,7 +64,7 @@ public class WalletTransactions {
 	private static final TransactionSearch SEARCH = new TransactionSearch("wallet_transactions",
 			"wallet_transaction_tags", "wallet_categories", null);
 
-	private static final String COLUMNS = "id, type, amount, currency, date, description, category_id, recurring_id, "
+	private static final String COLUMNS = "id, type, amount, currency, date, description, website, category_id, recurring_id, "
 			+ "created_at, updated_at";
 
 	private final JdbcTemplate jdbc;
@@ -79,10 +81,13 @@ public class WalletTransactions {
 
 	private final UserZones zones;
 
+	private final LogoService logos;
+
 	private final Clock clock;
 
 	public WalletTransactions(JdbcTemplate jdbc, WalletCategories categories, WalletTags tags,
-			StoredFileRepository files, FileService fileService, WalletBudgets budgets, UserZones zones, Clock clock) {
+			StoredFileRepository files, FileService fileService, WalletBudgets budgets, UserZones zones,
+			LogoService logos, Clock clock) {
 		this.jdbc = jdbc;
 		this.categories = categories;
 		this.tags = tags;
@@ -90,6 +95,7 @@ public class WalletTransactions {
 		this.fileService = fileService;
 		this.budgets = budgets;
 		this.zones = zones;
+		this.logos = logos;
 		this.clock = clock;
 	}
 
@@ -131,12 +137,13 @@ public class WalletTransactions {
 		}
 		UUID id = UUID.randomUUID();
 		this.jdbc.update("INSERT INTO wallet_transactions (id, user_id, type, amount, currency, date, description, "
-				+ "category_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", id, user.getId(), checked.type(),
-				checked.amount(), checked.currency(), Date.valueOf(checked.date()), checked.description(),
-				checked.categoryId(), Timestamp.from(this.clock.instant()));
+				+ "website, category_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", id, user.getId(),
+				checked.type(), checked.amount(), checked.currency(), Date.valueOf(checked.date()),
+				checked.description(), checked.website(), checked.categoryId(), Timestamp.from(this.clock.instant()));
 		saveTags(id, checked.tagIds());
 		checked.files().forEach((file) -> attach(file, id));
 		this.budgets.checkAlerts(user.getId());
+		this.logos.prefetch(checked.website());
 		return get(user, id);
 	}
 
@@ -149,9 +156,9 @@ public class WalletTransactions {
 		WalletTx existing = get(user, id);
 		Checked checked = check(user, request, existing);
 		this.jdbc.update("UPDATE wallet_transactions SET type = ?, amount = ?, currency = ?, date = ?, description = ?, "
-				+ "category_id = ?, updated_at = ? WHERE id = ? AND user_id = ?", checked.type(), checked.amount(),
-				checked.currency(), Date.valueOf(checked.date()), checked.description(), checked.categoryId(),
-				Timestamp.from(this.clock.instant()), id, user.getId());
+				+ "website = ?, category_id = ?, updated_at = ? WHERE id = ? AND user_id = ?", checked.type(),
+				checked.amount(), checked.currency(), Date.valueOf(checked.date()), checked.description(),
+				checked.website(), checked.categoryId(), Timestamp.from(this.clock.instant()), id, user.getId());
 		this.jdbc.update("DELETE FROM wallet_transaction_tags WHERE transaction_id = ?", id);
 		saveTags(id, checked.tagIds());
 		Set<UUID> keep = checked.files().stream().map(StoredFile::getId).collect(Collectors.toSet());
@@ -159,6 +166,7 @@ public class WalletTransactions {
 		this.fileService.deleteNow(current.stream().filter((file) -> !keep.contains(file.getId())).toList());
 		checked.files().forEach((file) -> attach(file, id));
 		this.budgets.checkAlerts(user.getId());
+		this.logos.prefetch(checked.website());
 		return get(user, id);
 	}
 
@@ -215,6 +223,7 @@ public class WalletTransactions {
 		catch (DateTimeParseException ex) {
 			throw invalid("date: must be a real date like 2026-03-31");
 		}
+		String website = Websites.normalize(request.website());
 		ZoneId zone = this.zones.saved(user.getId()).orElse(LATEST_ZONE);
 		if (date.isAfter(LocalDate.now(this.clock.withZone(zone)))) {
 			throw new ApiException(HttpStatus.BAD_REQUEST, "future_date", "The date cannot be in the future");
@@ -255,8 +264,8 @@ public class WalletTransactions {
 			throw invalid("fileIds: use files you just uploaded, or files already on this transaction");
 		}
 		foundFiles.sort(Comparator.comparing(StoredFile::getCreatedAt));
-		return new Checked(request.type(), amount, request.currency(), date, request.description(), category.id(),
-				tagIds, foundFiles);
+		return new Checked(request.type(), amount, request.currency(), date, request.description(), website,
+				category.id(), tagIds, foundFiles);
 	}
 
 	private List<DuplicateException.Match> duplicates(User user, Checked checked) {
@@ -304,12 +313,17 @@ public class WalletTransactions {
 			.mine(userId, tagLinks.values().stream().flatMap(List::stream).collect(Collectors.toSet()))
 			.stream()
 			.collect(Collectors.toMap(WalletTags.Tag::id, (tag) -> tag));
-		Map<UUID, WalletCategories.Category> categoriesById = this.categories.byIds(userId,
+		Map<UUID, WalletCategories.Category> categoriesById = this.categories.withParents(userId,
 				rows.values().stream().map(Row::categoryId).collect(Collectors.toSet()));
 		Map<UUID, List<FileResponse>> filesByTx = this.files.findAllByWalletTransactionIdInOrderByCreatedAtAsc(ids)
 			.stream()
 			.collect(Collectors.groupingBy(StoredFile::getWalletTransactionId,
 					Collectors.mapping(FileResponse::from, Collectors.toList())));
+		List<String> domains = new ArrayList<>();
+		rows.values().stream().map(Row::website).filter(Objects::nonNull).forEach(domains::add);
+		categoriesById.values().stream().map(WalletCategories.Category::website).filter(Objects::nonNull)
+			.forEach(domains::add);
+		Map<String, String> logoUrls = this.logos.logoUrls(domains);
 		List<WalletTx> result = new ArrayList<>();
 		for (UUID id : ids) {
 			Row row = rows.get(id);
@@ -317,6 +331,10 @@ public class WalletTransactions {
 				continue;
 			}
 			WalletCategories.Category category = categoriesById.get(row.categoryId());
+			WalletCategories.Category parent = (category != null && category.parentId() != null)
+					? categoriesById.get(category.parentId()) : null;
+			String logoUrl = LogoService.firstLogo(logoUrls, row.website(),
+					(category != null) ? category.website() : null, (parent != null) ? parent.website() : null);
 			CategoryRef categoryRef = (category != null) ? new CategoryRef(category.id(), category.name(),
 					category.icon(), category.archived(), category.parentId()) : null;
 			List<TagRef> tagRefs = tagLinks.getOrDefault(id, List.of())
@@ -327,7 +345,7 @@ public class WalletTransactions {
 				.map((tag) -> new TagRef(tag.id(), tag.name()))
 				.toList();
 			result.add(new WalletTx(id, row.type(), Totals.money(row.amount()), row.currency(), row.date(),
-					row.description(), categoryRef, tagRefs, filesByTx.getOrDefault(id, List.of()), row.recurringId(),
+					row.description(), row.website(), logoUrl, categoryRef, tagRefs, filesByTx.getOrDefault(id, List.of()), row.recurringId(),
 					row.createdAt(), row.updatedAt()));
 		}
 		return result;
@@ -336,7 +354,7 @@ public class WalletTransactions {
 	private static Row map(ResultSet rs, int rowNum) throws SQLException {
 		return new Row(rs.getObject("id", UUID.class), rs.getString("type"), rs.getBigDecimal("amount"),
 				rs.getString("currency"), rs.getDate("date").toLocalDate(), rs.getString("description"),
-				rs.getObject("category_id", UUID.class), rs.getObject("recurring_id", UUID.class),
+				rs.getString("website"), rs.getObject("category_id", UUID.class), rs.getObject("recurring_id", UUID.class),
 				rs.getTimestamp("created_at").toInstant(),
 				(rs.getTimestamp("updated_at") != null) ? rs.getTimestamp("updated_at").toInstant() : null);
 	}
@@ -355,20 +373,22 @@ public class WalletTransactions {
 	}
 
 	private record Row(UUID id, String type, BigDecimal amount, String currency, LocalDate date, String description,
-			UUID categoryId, UUID recurringId, Instant createdAt, Instant updatedAt) {
+			String website, UUID categoryId, UUID recurringId, Instant createdAt, Instant updatedAt) {
 	}
 
 	private record Checked(String type, BigDecimal amount, String currency, LocalDate date, String description,
-			UUID categoryId, Set<UUID> tagIds, List<StoredFile> files) {
+			String website, UUID categoryId, Set<UUID> tagIds, List<StoredFile> files) {
 	}
 
 	/**
 	 * A wallet transaction as the API returns it.
+	 * @param website bare domain like "claude.ai", or null
+	 * @param logoUrl path of the website's logo, or null (show the category icon)
 	 * @param recurringId the recurring item that made it (null if added by hand)
 	 * @param updatedAt null if never changed
 	 */
 	public record WalletTx(UUID id, String type, String amount, String currency, LocalDate date, String description,
-			CategoryRef category, List<TagRef> tags, List<FileResponse> files, UUID recurringId, Instant createdAt,
+			String website, String logoUrl, CategoryRef category, List<TagRef> tags, List<FileResponse> files, UUID recurringId, Instant createdAt,
 			Instant updatedAt) {
 	}
 

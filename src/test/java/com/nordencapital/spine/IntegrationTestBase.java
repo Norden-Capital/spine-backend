@@ -75,6 +75,7 @@ public abstract class IntegrationTestBase {
 
 	@BeforeEach
 	void cleanDatabase() throws IOException {
+		this.jdbc.update("DELETE FROM logos");
 		this.jdbc.update("DELETE FROM notifications");
 		this.jdbc.update("DELETE FROM wallet_goal_contributions");
 		this.jdbc.update("DELETE FROM wallet_goals");
@@ -181,6 +182,11 @@ public abstract class IntegrationTestBase {
 
 		public MvcTestResult get(String uri) {
 			return send(this.mvc.get().uri(uri));
+		}
+
+		/** GET with If-None-Match (as a browser does for a cached copy). */
+		public MvcTestResult getIfNoneMatch(String uri, String etag) {
+			return send(this.mvc.get().uri(uri).header("If-None-Match", etag));
 		}
 
 		public MvcTestResult post(String uri, String json) {

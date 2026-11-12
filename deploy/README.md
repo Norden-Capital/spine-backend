@@ -26,13 +26,15 @@ Files here:
 
 | File | What it is |
 | --- | --- |
-| `compose.prod.yaml` | Postgres + API containers |
+| `compose.prod.yaml` | Postgres + API + nightly backup containers |
+| `backup.sh` | Nightly backup script (DB + proof files, 03:00 Morocco, keep 14) |
+| `RESTORE.md` | Where backups are and how to restore one night |
 | `.env.example` | Template for the server `.env` file |
 
 ## Automatic deploy
 
 Every push to `main`: CI passes → `.github/workflows/deploy.yml` builds the
-image, pushes it to GHCR, copies `compose.prod.yaml` to `/opt/spine`, pulls,
+image, pushes it to GHCR, copies `compose.prod.yaml` and `backup.sh` to `/opt/spine`, pulls,
 starts and waits until the API is healthy. If not healthy, the job fails.
 
 The server logs in to GHCR with the job's own short-lived token, pulls, and

@@ -25,6 +25,8 @@ import org.springframework.transaction.annotation.Transactional;
 import com.nordencapital.spine.category.CategoryIcons;
 import com.nordencapital.spine.category.CategoryService;
 import com.nordencapital.spine.common.ApiException;
+import com.nordencapital.spine.common.Websites;
+import com.nordencapital.spine.logo.LogoService;
 import com.nordencapital.spine.common.CategoryTree;
 import com.nordencapital.spine.common.ParentPatch;
 
@@ -42,14 +44,17 @@ public class WalletCategories {
 			new String[] { "Fun", "ticket" }, new String[] { "Salary", "banknote" },
 			new String[] { "Other", "ellipsis" });
 
-	private static final String COLUMNS = "id, parent_id, name, icon, archived";
+	private static final String COLUMNS = "id, parent_id, name, icon, archived, website";
 
 	private final JdbcTemplate jdbc;
 
+	private final LogoService logos;
+
 	private final Clock clock;
 
-	public WalletCategories(JdbcTemplate jdbc, Clock clock) {
+	public WalletCategories(JdbcTemplate jdbc, LogoService logos, Clock clock) {
 		this.jdbc = jdbc;
+		this.logos = logos;
 		this.clock = clock;
 	}
 
@@ -77,9 +82,10 @@ public class WalletCategories {
 		List<Category> all = all(userId);
 		Map<UUID, Category> byId = all.stream().collect(Collectors.toMap(Category::id, Function.identity()));
 		Map<UUID, Long> usage = usage(userId);
+		Map<String, String> logoUrls = logoUrls(all);
 		return all.stream()
 			.filter((category) -> pickable(category, byId))
-			.map((category) -> category.pick(usage.getOrDefault(category.id(), 0L)))
+			.map((category) -> category.pick(usage.getOrDefault(category.id(), 0L), logoUrls))
 			.sorted(Comparator.comparingLong(Pick::usageCount).reversed()
 				.thenComparing(Pick::name, String.CASE_INSENSITIVE_ORDER))
 			.toList();
@@ -89,8 +95,10 @@ public class WalletCategories {
 	@Transactional(readOnly = true)
 	public List<Pick> allPicks(UUID userId) {
 		Map<UUID, Long> usage = usage(userId);
-		return all(userId).stream()
-			.map((category) -> category.pick(usage.getOrDefault(category.id(), 0L)))
+		List<Category> all = all(userId);
+		Map<String, String> logoUrls = logoUrls(all);
+		return all.stream()
+			.map((category) -> category.pick(usage.getOrDefault(category.id(), 0L), logoUrls))
 			.sorted(Comparator.comparing(Pick::name, String.CASE_INSENSITIVE_ORDER))
 			.toList();
 	}
@@ -99,19 +107,21 @@ public class WalletCategories {
 	 * @throws ApiException 409 {@code name_taken}, 400 {@code validation_error}
 	 */
 	@Transactional
-	public Pick create(UUID userId, String name, String icon, UUID parentId) {
+	public Pick create(UUID userId, String name, String icon, UUID parentId, String website) {
 		CategoryIcons.check(icon);
+		String domain = Websites.normalize(website);
 		CategoryTree.checkParent(null, parentId, false, (id) -> node(userId, id));
 		UUID id = UUID.randomUUID();
 		Timestamp now = Timestamp.from(this.clock.instant());
 		try {
-			this.jdbc.update("INSERT INTO wallet_categories (id, user_id, parent_id, name, icon, archived, created_at, "
-					+ "updated_at) VALUES (?, ?, ?, ?, ?, false, ?, ?)", id, userId, parentId, name, icon, now, now);
+			this.jdbc.update("INSERT INTO wallet_categories (id, user_id, parent_id, name, icon, website, archived, "
+					+ "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, false, ?, ?)", id, userId, parentId, name, icon,
+					domain, now, now);
 		}
 		catch (DuplicateKeyException ex) {
 			throw nameTaken();
 		}
-		return mine(userId, id).pick(0L);
+		return picked(userId, id, 0L);
 	}
 
 	/**
@@ -119,7 +129,7 @@ public class WalletCategories {
 	 * {@code validation_error}
 	 */
 	@Transactional
-	public Pick update(UUID userId, UUID id, String name, String icon, ParentPatch parent) {
+	public Pick update(UUID userId, UUID id, String name, String icon, ParentPatch parent, Websites.Patch website) {
 		Category category = mine(userId, id);
 		if (icon != null) {
 			CategoryIcons.check(icon);
@@ -132,14 +142,15 @@ public class WalletCategories {
 			parentId = parent.parentId();
 		}
 		try {
-			this.jdbc.update("UPDATE wallet_categories SET name = ?, icon = ?, parent_id = ?, updated_at = ? WHERE id = ?",
-					(name != null) ? name : category.name(), (icon != null) ? icon : category.icon(), parentId,
+			this.jdbc.update("UPDATE wallet_categories SET name = ?, icon = ?, parent_id = ?, website = ?, updated_at = ? "
+					+ "WHERE id = ?", (name != null) ? name : category.name(), (icon != null) ? icon : category.icon(),
+					parentId, website.given() ? website.domain() : category.website(),
 					Timestamp.from(this.clock.instant()), id);
 		}
 		catch (DuplicateKeyException ex) {
 			throw nameTaken();
 		}
-		return mine(userId, id).pick(usage(userId).getOrDefault(id, 0L));
+		return picked(userId, id, usage(userId).getOrDefault(id, 0L));
 	}
 
 	/** @throws ApiException 404 {@code category_not_found} */
@@ -148,7 +159,18 @@ public class WalletCategories {
 		mine(userId, id);
 		this.jdbc.update("UPDATE wallet_categories SET archived = ?, updated_at = ? WHERE id = ?", archived,
 				Timestamp.from(this.clock.instant()), id);
-		return mine(userId, id).pick(usage(userId).getOrDefault(id, 0L));
+		return picked(userId, id, usage(userId).getOrDefault(id, 0L));
+	}
+
+	/** One saved category as a Pick; starts fetching its logo in the background. */
+	private Pick picked(UUID userId, UUID id, long usageCount) {
+		Category category = mine(userId, id);
+		this.logos.prefetch(category.website());
+		return category.pick(usageCount, logoUrls(List.of(category)));
+	}
+
+	private Map<String, String> logoUrls(List<Category> categories) {
+		return this.logos.logoUrls(categories.stream().map(Category::website).toList());
 	}
 
 	/** One of my categories. @throws ApiException 404 {@code category_not_found} */
@@ -180,6 +202,25 @@ public class WalletCategories {
 			.collect(Collectors.toMap(Category::id, Function.identity()));
 	}
 
+	/** These categories of mine plus their parents. */
+	Map<UUID, Category> withParents(UUID userId, java.util.Collection<UUID> ids) {
+		if (ids.isEmpty()) {
+			return Map.of();
+		}
+		Map<UUID, Category> all = all(userId).stream().collect(Collectors.toMap(Category::id, Function.identity()));
+		Map<UUID, Category> result = new HashMap<>();
+		for (UUID id : ids) {
+			Category category = all.get(id);
+			if (category != null) {
+				result.put(id, category);
+				if (category.parentId() != null && all.containsKey(category.parentId())) {
+					result.put(category.parentId(), all.get(category.parentId()));
+				}
+			}
+		}
+		return result;
+	}
+
 	private List<Category> all(UUID userId) {
 		return this.jdbc.query("SELECT " + COLUMNS + " FROM wallet_categories WHERE user_id = ?",
 				WalletCategories::map, userId);
@@ -207,23 +248,29 @@ public class WalletCategories {
 
 	private static Category map(ResultSet rs, int row) throws SQLException {
 		return new Category(rs.getObject("id", UUID.class), rs.getObject("parent_id", UUID.class),
-				rs.getString("name"), rs.getString("icon"), rs.getBoolean("archived"));
+				rs.getString("name"), rs.getString("icon"), rs.getBoolean("archived"), rs.getString("website"));
 	}
 
 	private static ApiException nameTaken() {
 		return new ApiException(HttpStatus.CONFLICT, "name_taken", "You already have a category with this name");
 	}
 
-	record Category(UUID id, UUID parentId, String name, String icon, boolean archived) {
+	record Category(UUID id, UUID parentId, String name, String icon, boolean archived, String website) {
 
-		Pick pick(long usageCount) {
-			return new Pick(this.id, this.name, this.icon, this.archived, this.parentId, usageCount);
+		Pick pick(long usageCount, Map<String, String> logoUrls) {
+			return new Pick(this.id, this.name, this.icon, this.archived, this.parentId, this.website,
+					logoUrls.get(this.website), usageCount);
 		}
 
 	}
 
-	/** A wallet category as the API returns it. */
-	public record Pick(UUID id, String name, String icon, boolean archived, UUID parentId, long usageCount) {
+	/**
+	 * A wallet category as the API returns it.
+	 * @param website bare domain, or null
+	 * @param logoUrl path of the website's logo, or null (show the icon)
+	 */
+	public record Pick(UUID id, String name, String icon, boolean archived, UUID parentId, String website,
+			String logoUrl, long usageCount) {
 	}
 
 }

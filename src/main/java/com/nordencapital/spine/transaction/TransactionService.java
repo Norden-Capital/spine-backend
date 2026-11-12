@@ -33,8 +33,10 @@ import com.nordencapital.spine.common.DuplicateException;
 import com.nordencapital.spine.common.ListFilter;
 import com.nordencapital.spine.common.ListPage;
 import com.nordencapital.spine.common.TransactionSearch;
+import com.nordencapital.spine.common.Websites;
 import com.nordencapital.spine.file.StoredFile;
 import com.nordencapital.spine.file.StoredFileRepository;
+import com.nordencapital.spine.logo.LogoService;
 import com.nordencapital.spine.me.UserZones;
 import com.nordencapital.spine.tag.Tag;
 import com.nordencapital.spine.tag.TagRepository;
@@ -88,11 +90,13 @@ public class TransactionService {
 
 	private final JdbcTemplate jdbc;
 
+	private final LogoService logos;
+
 	private final Clock clock;
 
 	public TransactionService(TransactionRepository transactions, CategoryRepository categories, TagRepository tags,
 			StoredFileRepository files, TransactionViews views, TransactionHistory history, Actors actors,
-			UserZones zones, CategoryService categoryService, JdbcTemplate jdbc, Clock clock) {
+			UserZones zones, CategoryService categoryService, JdbcTemplate jdbc, LogoService logos, Clock clock) {
 		this.transactions = transactions;
 		this.categories = categories;
 		this.tags = tags;
@@ -103,6 +107,7 @@ public class TransactionService {
 		this.zones = zones;
 		this.categoryService = categoryService;
 		this.jdbc = jdbc;
+		this.logos = logos;
 		this.clock = clock;
 	}
 
@@ -155,6 +160,7 @@ public class TransactionService {
 		checked.files().forEach((file) -> file.attachTo(transaction.getId()));
 		this.history.record(transaction.getId(), actor.getId(), TransactionHistory.CREATED,
 				diff(Snapshot.EMPTY, snapshot(checked)), now);
+		this.logos.prefetch(transaction.getWebsite());
 		return this.views.one(transaction, actor);
 	}
 
@@ -182,6 +188,7 @@ public class TransactionService {
 		checked.files().forEach((file) -> file.attachTo(id));
 		this.transactions.flush();
 		this.history.record(id, actor.getId(), TransactionHistory.UPDATED, changes, now);
+		this.logos.prefetch(transaction.getWebsite());
 		return this.views.one(transaction, actor);
 	}
 
@@ -247,6 +254,7 @@ public class TransactionService {
 			throw invalid("amount: must be more than 0 and at most 9999999999.99");
 		}
 		LocalDate date = parseDate(request.date());
+		String website = Websites.normalize(request.website());
 		ZoneId zone = this.zones.saved(actor.getId()).orElse(LATEST_ZONE);
 		if (date.isAfter(LocalDate.now(this.clock.withZone(zone)))) {
 			throw new ApiException(HttpStatus.BAD_REQUEST, "future_date", "The date cannot be in the future");
@@ -293,7 +301,7 @@ public class TransactionService {
 		foundFiles.sort((a, b) -> a.getCreatedAt().compareTo(b.getCreatedAt()));
 
 		Transaction.Values values = new Transaction.Values(request.type(), amount.setScale(2), request.currency(),
-				date, request.description(), category.getId(), tagIds);
+				date, request.description(), website, category.getId(), tagIds);
 		return new Checked(values, category, foundTags, foundFiles);
 	}
 
@@ -332,7 +340,7 @@ public class TransactionService {
 
 	private Snapshot snapshot(Transaction tx, List<StoredFile> currentFiles) {
 		return new Snapshot(tx.getType(), TransactionViews.money(tx.getAmount()), tx.getCurrency(),
-				tx.getDate().toString(), tx.getDescription(), tx.getCategoryId(),
+				tx.getDate().toString(), tx.getDescription(), tx.getWebsite(), tx.getCategoryId(),
 				this.views.categoryName(tx.getCategoryId()), tx.getTagIds(), this.views.tagNames(tx.getTagIds()),
 				currentFiles.stream().map(StoredFile::getId).collect(Collectors.toSet()),
 				currentFiles.stream().map(StoredFile::getOriginalName).collect(Collectors.joining(", ")));
@@ -341,7 +349,7 @@ public class TransactionService {
 	private static Snapshot snapshot(Checked checked) {
 		Transaction.Values v = checked.values();
 		return new Snapshot(v.type(), TransactionViews.money(v.amount()), v.currency(), v.date().toString(),
-				v.description(), checked.category().getId(), checked.category().getName(), v.tagIds(),
+				v.description(), v.website(), checked.category().getId(), checked.category().getName(), v.tagIds(),
 				checked.tags()
 					.stream()
 					.map(Tag::getName)
@@ -361,6 +369,7 @@ public class TransactionService {
 		add(changes, "date", before.date(), after.date(), Objects.equals(before.date(), after.date()));
 		add(changes, "description", before.description(), after.description(),
 				Objects.equals(before.description(), after.description()));
+		add(changes, "website", before.website(), after.website(), Objects.equals(before.website(), after.website()));
 		add(changes, "category", before.categoryName(), after.categoryName(),
 				Objects.equals(before.categoryId(), after.categoryId()));
 		add(changes, "tags", before.tagNames(), after.tagNames(), Objects.equals(before.tagIds(), after.tagIds()));
@@ -395,10 +404,10 @@ public class TransactionService {
 
 	/** Display values of all fields, to compare before and after. */
 	private record Snapshot(String type, String amount, String currency, String date, String description,
-			UUID categoryId, String categoryName, Set<UUID> tagIds, String tagNames, Set<UUID> fileIds,
+			String website, UUID categoryId, String categoryName, Set<UUID> tagIds, String tagNames, Set<UUID> fileIds,
 			String fileNames) {
 
-		static final Snapshot EMPTY = new Snapshot(null, null, null, null, null, null, null, Set.of(), "", Set.of(),
+		static final Snapshot EMPTY = new Snapshot(null, null, null, null, null, null, null, null, Set.of(), "", Set.of(),
 				"");
 
 	}

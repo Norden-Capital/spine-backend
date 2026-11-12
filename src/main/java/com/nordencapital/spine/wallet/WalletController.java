@@ -34,6 +34,7 @@ import com.nordencapital.spine.common.ListFilter;
 import com.nordencapital.spine.common.ListPage;
 import com.nordencapital.spine.common.Names;
 import com.nordencapital.spine.common.ParentPatch;
+import com.nordencapital.spine.common.Websites;
 import com.nordencapital.spine.common.Totals;
 import com.nordencapital.spine.transaction.TransactionRequest;
 import com.nordencapital.spine.user.User;
@@ -147,15 +148,18 @@ public class WalletController {
 	public ResponseEntity<WalletCategories.Pick> createCategory(@AuthenticationPrincipal AuthUser actor,
 			@Valid @RequestBody CategoryRequest body, HttpServletRequest request) {
 		return ResponseEntity.status(HttpStatus.CREATED)
-			.body(this.categories.create(me(actor, request).getId(), body.name(), body.icon(), body.parentId()));
+			.body(this.categories.create(me(actor, request).getId(), body.name(), body.icon(), body.parentId(),
+					body.website()));
 	}
 
-	@Operation(summary = "Change a category", description = "parentId: leave out = keep, null = top level.")
+	@Operation(summary = "Change a category",
+			description = "parentId: leave out = keep, null = top level. website: leave out = keep, null or \"\" = "
+					+ "remove.")
 	@PatchMapping("/api/wallet/categories/{id}")
 	public WalletCategories.Pick updateCategory(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody CategoryUpdate body, HttpServletRequest request) {
 		return this.categories.update(me(actor, request).getId(), id, body.name(), body.icon(),
-				ParentPatch.of(body.parentId()));
+				ParentPatch.of(body.parentId()), Websites.patch(body.website()));
 	}
 
 	@PostMapping("/api/wallet/categories/{id}/archive")
@@ -393,7 +397,9 @@ public class WalletController {
 	public record CategoryRequest(
 			@NotBlank @Size(max = Names.MAX_LENGTH) @Pattern(regexp = Names.NO_CONTROL_CHARS,
 					message = "must not contain control characters") String name,
-			@NotNull String icon, UUID parentId) {
+			@NotNull String icon, UUID parentId,
+			@Schema(nullable = true, description = "Optional website (logo), e.g. \"claude.ai\"")
+			@Size(max = Websites.MAX_INPUT) String website) {
 
 		public CategoryRequest {
 			name = Names.clean(name);
@@ -405,7 +411,9 @@ public class WalletController {
 	public record CategoryUpdate(
 			@Size(min = 1, max = Names.MAX_LENGTH) @Pattern(regexp = Names.NO_CONTROL_CHARS,
 					message = "must not contain control characters") String name,
-			String icon, @Schema(type = "string", format = "uuid", nullable = true) JsonNode parentId) {
+			String icon, @Schema(type = "string", format = "uuid", nullable = true) JsonNode parentId,
+			@Schema(type = "string", nullable = true, description = "Leave out = keep; null or \"\" = remove")
+			JsonNode website) {
 
 		public CategoryUpdate {
 			name = Names.clean(name);

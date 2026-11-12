@@ -74,12 +74,6 @@ app:
     # Empty = emails are only printed to the console (local dev).
     resend-api-key: ${RESEND_API_KEY:}
     require-resend: false
-  ai:
-    # Optional. Empty = AI suggestions are off (GET /api/features says ai: false).
-    anthropic-api-key: ${ANTHROPIC_API_KEY:}
-    model: claude-haiku-5-5
-    timeout: 10s
-    max-per-hour: 20
   files:
     # Uploaded proof files. Local runs keep them in ./data/files (ignored by git).
     dir: ${APP_FILES_DIR:./data/files}

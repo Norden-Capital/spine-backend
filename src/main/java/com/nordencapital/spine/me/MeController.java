@@ -29,6 +29,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.nordencapital.spine.auth.AuthUser;
+import com.nordencapital.spine.auth.SessionLogin;
 import com.nordencapital.spine.common.ApiError;
 
 @Tag(name = "Me", description = "The logged-in user's own profile, login history, password and preferences. "
@@ -45,11 +46,13 @@ public class MeController {
 		this.meService = meService;
 	}
 
-	@Operation(summary = "My profile")
+	@Operation(summary = "My profile",
+			description = "lastLoginAt = this session's login; previousLoginAt = the successful login before it "
+					+ "(null if none).")
 	@ApiResponse(responseCode = "200", description = "OK")
 	@GetMapping
-	public ProfileResponse profile(@AuthenticationPrincipal AuthUser principal) {
-		return ProfileResponse.from(this.meService.profile(principal));
+	public ProfileResponse profile(@AuthenticationPrincipal AuthUser principal, HttpServletRequest request) {
+		return response(this.meService.profile(principal), request);
 	}
 
 	@Operation(summary = "Change my first and last name",
@@ -59,8 +62,12 @@ public class MeController {
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
 	@PatchMapping
 	public ProfileResponse updateNames(@AuthenticationPrincipal AuthUser principal,
-			@Valid @RequestBody NamesRequest body) {
-		return ProfileResponse.from(this.meService.updateNames(principal, body.firstName(), body.lastName()));
+			@Valid @RequestBody NamesRequest body, HttpServletRequest request) {
+		return response(this.meService.updateNames(principal, body.firstName(), body.lastName()), request);
+	}
+
+	private ProfileResponse response(com.nordencapital.spine.user.User user, HttpServletRequest request) {
+		return ProfileResponse.from(user, this.meService.previousLogin(user, SessionLogin.loginAt(request)));
 	}
 
 	@Operation(summary = "My logins per day",

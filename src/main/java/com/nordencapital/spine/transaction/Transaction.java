@@ -41,6 +41,9 @@ public class Transaction {
 	@Column(nullable = false, length = 200)
 	private String description;
 
+	@Column(length = 253)
+	private String website;
+
 	@Column(name = "category_id", nullable = false)
 	private UUID categoryId;
 
@@ -101,6 +104,7 @@ public class Transaction {
 		this.currency = values.currency();
 		this.date = values.date();
 		this.description = values.description();
+		this.website = values.website();
 		this.categoryId = values.categoryId();
 		this.tagIds.clear();
 		this.tagIds.addAll(values.tagIds());
@@ -132,6 +136,11 @@ public class Transaction {
 
 	public String getDescription() {
 		return this.description;
+	}
+
+	/** The bare domain like "claude.ai", or null. */
+	public String getWebsite() {
+		return this.website;
 	}
 
 	public UUID getCategoryId() {
@@ -168,7 +177,7 @@ public class Transaction {
 
 	/** Checked values from a create or update request (files are kept on the files table). */
 	record Values(String type, BigDecimal amount, String currency, LocalDate date, String description,
-			UUID categoryId, Set<UUID> tagIds) {
+			String website, UUID categoryId, Set<UUID> tagIds) {
 	}
 
 }

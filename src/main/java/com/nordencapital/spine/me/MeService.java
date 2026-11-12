@@ -41,8 +41,12 @@ public class MeService {
 
 	private final Clock clock;
 
+	private final com.nordencapital.spine.auth.LoginEvents loginEvents;
+
 	public MeService(UserRepository users, UserPreferencesRepository preferences, SignInHistory signInHistory,
-			PasswordEncoder passwordEncoder, UserSessions sessions, AuthLimiters limiters, Clock clock) {
+			PasswordEncoder passwordEncoder, UserSessions sessions, AuthLimiters limiters, Clock clock,
+			com.nordencapital.spine.auth.LoginEvents loginEvents) {
+		this.loginEvents = loginEvents;
 		this.users = users;
 		this.preferences = preferences;
 		this.signInHistory = signInHistory;
@@ -50,6 +54,16 @@ public class MeService {
 		this.sessions = sessions;
 		this.limiters = limiters;
 		this.clock = clock;
+	}
+
+	/**
+	 * The successful login before this session's one, or null.
+	 * @param sessionLoginAt when this session logged in (null for older sessions: then the
+	 * login before the newest one)
+	 */
+	@Transactional(readOnly = true)
+	public java.time.Instant previousLogin(User user, java.time.Instant sessionLoginAt) {
+		return this.loginEvents.previousSuccess(user.getId(), sessionLoginAt);
 	}
 
 	@Transactional(readOnly = true)

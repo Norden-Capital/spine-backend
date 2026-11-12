@@ -21,6 +21,7 @@ import com.nordencapital.spine.category.CategoryRepository;
 import com.nordencapital.spine.file.FileResponse;
 import com.nordencapital.spine.file.StoredFile;
 import com.nordencapital.spine.file.StoredFileRepository;
+import com.nordencapital.spine.logo.LogoService;
 import com.nordencapital.spine.tag.Tag;
 import com.nordencapital.spine.tag.TagRepository;
 import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
@@ -45,12 +46,15 @@ class TransactionViews {
 
 	private final StoredFileRepository files;
 
+	private final LogoService logos;
+
 	TransactionViews(UserRepository users, CategoryRepository categories, TagRepository tags,
-			StoredFileRepository files) {
+			StoredFileRepository files, LogoService logos) {
 		this.users = users;
 		this.categories = categories;
 		this.tags = tags;
 		this.files = files;
+		this.logos = logos;
 	}
 
 	TransactionResponse one(Transaction transaction, User actor) {
@@ -107,6 +111,10 @@ class TransactionViews {
 
 	private TransactionResponse toResponse(Transaction tx, User actor, Lookups lookups) {
 		Category category = lookups.categories().get(tx.getCategoryId());
+		Category parent = (category != null && category.getParentId() != null)
+				? lookups.categories().get(category.getParentId()) : null;
+		String logoUrl = LogoService.firstLogo(lookups.logoUrls(), tx.getWebsite(),
+				(category != null) ? category.getWebsite() : null, (parent != null) ? parent.getWebsite() : null);
 		CategoryRef categoryRef = (category != null) ? new CategoryRef(category.getId(), category.getName(),
 				category.getIcon(), category.isArchived(), category.getParentId()) : null;
 		List<TagRef> tagRefs = tx.getTagIds()
@@ -118,7 +126,7 @@ class TransactionViews {
 			.toList();
 		List<FileResponse> fileRefs = lookups.files().getOrDefault(tx.getId(), List.of());
 		return new TransactionResponse(tx.getId(), tx.getType(), money(tx.getAmount()), tx.getCurrency(),
-				tx.getDate(), tx.getDescription(), categoryRef, tagRefs, fileRefs,
+				tx.getDate(), tx.getDescription(), tx.getWebsite(), logoUrl, categoryRef, tagRefs, fileRefs,
 				userRef(lookups.users(), tx.getCreatedBy()), tx.getCreatedAt(),
 				userRef(lookups.users(), tx.getUpdatedBy()), tx.getUpdatedAt(), canDelete(tx, actor));
 	}
@@ -136,6 +144,7 @@ class TransactionViews {
 		Set<UUID> categoryIds = new HashSet<>();
 		Set<UUID> tagIds = new HashSet<>();
 		Set<UUID> transactionIds = new HashSet<>();
+		Set<String> websites = new HashSet<>();
 		for (Transaction tx : transactions) {
 			Stream.of(tx.getCreatedBy(), tx.getUpdatedBy(), tx.getDeletedBy())
 				.filter(Objects::nonNull)
@@ -143,15 +152,35 @@ class TransactionViews {
 			categoryIds.add(tx.getCategoryId());
 			tagIds.addAll(tx.getTagIds());
 			transactionIds.add(tx.getId());
+			if (tx.getWebsite() != null) {
+				websites.add(tx.getWebsite());
+			}
 		}
+		Map<UUID, Category> categoriesById = new java.util.HashMap<>(
+				byId(this.categories.findAllById(categoryIds), Category::getId));
+		Set<UUID> parentIds = categoriesById.values()
+			.stream()
+			.map(Category::getParentId)
+			.filter((id) -> id != null && !categoriesById.containsKey(id))
+			.collect(Collectors.toSet());
+		if (!parentIds.isEmpty()) {
+			for (Category parent : this.categories.findAllById(parentIds)) {
+				categoriesById.put(parent.getId(), parent);
+			}
+		}
+		categoriesById.values()
+			.stream()
+			.map(Category::getWebsite)
+			.filter(Objects::nonNull)
+			.forEach(websites::add);
 		Map<UUID, List<FileResponse>> filesByTransaction = transactionIds.isEmpty() ? Map.of()
 				: this.files.findAllByTransactionIdInOrderByCreatedAtAsc(transactionIds)
 					.stream()
 					.collect(Collectors.groupingBy(StoredFile::getTransactionId,
 							Collectors.mapping(FileResponse::from, Collectors.toList())));
 		return new Lookups(byId(this.users.findAllById(userIds), User::getId),
-				byId(this.categories.findAllById(categoryIds), Category::getId),
-				byId(this.tags.findAllById(tagIds), Tag::getId), filesByTransaction);
+				categoriesById,
+				byId(this.tags.findAllById(tagIds), Tag::getId), filesByTransaction, this.logos.logoUrls(websites));
 	}
 
 	private static <T> Map<UUID, T> byId(List<T> items, Function<T, UUID> id) {
@@ -163,7 +192,7 @@ class TransactionViews {
 	}
 
 	private record Lookups(Map<UUID, User> users, Map<UUID, Category> categories, Map<UUID, Tag> tags,
-			Map<UUID, List<FileResponse>> files) {
+			Map<UUID, List<FileResponse>> files, Map<String, String> logoUrls) {
 	}
 
 }

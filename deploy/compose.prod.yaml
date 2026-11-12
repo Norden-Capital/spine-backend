@@ -53,8 +53,6 @@ services:
       APP_MAIL_FROM: ${APP_MAIL_FROM:?set APP_MAIL_FROM in .env}
       RESEND_API_KEY: ${RESEND_API_KEY:?set RESEND_API_KEY in .env}
       APP_BOOTSTRAP_ADMIN_EMAIL: ${APP_BOOTSTRAP_ADMIN_EMAIL:?set APP_BOOTSTRAP_ADMIN_EMAIL in .env}
-      # Optional: empty = AI comment suggestions are off.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       # Uploaded proof files (never public; only the API serves them to logged-in users).
       - files:/app/data
@@ -86,6 +84,36 @@ services:
       resources:
         limits:
           memory: 768m # TODO: tune; the JVM uses 75% of this (MaxRAMPercentage=75)
+    logging: *logging
+
+  # Nightly backup of the database and the proof files, kept on this VPS in
+  # /opt/spine/backups (root only). See backup.sh and RESTORE.md.
+  # Separate container: if a backup fails, the app keeps running.
+  backup:
+    # Same image as db, so pg_dump matches the server version.
+    image: postgres:18
+    restart: unless-stopped
+    init: true
+    entrypoint: ["bash", "/usr/local/bin/spine-backup.sh"]
+    environment:
+      # Morocco time (the offset changes during Ramadan, so no fixed UTC offset).
+      TZ: Africa/Casablanca
+      BACKUP_HOUR: "3"
+      BACKUP_KEEP: "14"
+      PGHOST: db
+      PGDATABASE: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      PGUSER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ./backup.sh:/usr/local/bin/spine-backup.sh:ro
+      - ./backups:/backups
+      - files:/files:ro
+    networks:
+      - spine
+    deploy:
+      resources:
+        limits:
+          memory: 256m
     logging: *logging
 
 networks:

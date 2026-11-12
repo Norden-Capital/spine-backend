@@ -142,6 +142,37 @@ class PasskeyIntegrationTests extends IntegrationTestBase {
 	}
 
 	@Test
+	void currentMarksOnlyThePasskeyUsedForThisSession() throws Exception {
+		activeUser("emp@example.com", Role.EMPLOYEE);
+		FakeAuthenticator phone = new FakeAuthenticator(ORIGIN);
+		FakeAuthenticator laptop = new FakeAuthenticator(ORIGIN);
+		Client byPassword = loggedIn("emp@example.com");
+		register(byPassword, phone, "iPhone");
+		register(byPassword, laptop, "Laptop");
+
+		// Password login: no passkey is "this device".
+		assertThat(byPassword.get("/api/me/passkeys")).bodyJson()
+			.extractingPath("$[*].current")
+			.asArray()
+			.containsExactly(false, false);
+
+		Client browser = client();
+		String request = options(browser, "/api/auth/passkey/options");
+		assertThat(browser.post("/api/auth/passkey/login", loginBody(phone.login(request)))).hasStatus(HttpStatus.OK);
+		MvcTestResult list = browser.get("/api/me/passkeys");
+		assertThat(list).bodyJson().extractingPath("$[?(@.name == 'iPhone')].current").asArray().containsExactly(true);
+		assertThat(list).bodyJson().extractingPath("$[?(@.name == 'Laptop')].current").asArray().containsExactly(false);
+
+		// Logging in again in the same browser with a password clears it.
+		assertThat(browser.post("/api/auth/login",
+				"{\"email\":\"emp@example.com\",\"password\":\"" + PASSWORD + "\"}")).hasStatus(HttpStatus.OK);
+		assertThat(browser.get("/api/me/passkeys")).bodyJson()
+			.extractingPath("$[*].current")
+			.asArray()
+			.containsExactly(false, false);
+	}
+
+	@Test
 	void disabledUserCannotLogInWithPasskey() throws Exception {
 		User user = activeUser("emp@example.com", Role.EMPLOYEE);
 		FakeAuthenticator phone = new FakeAuthenticator(ORIGIN);

@@ -31,7 +31,6 @@
 		<springdoc.version>3.2.0</springdoc.version>
 		<bouncycastle.version>1.86</bouncycastle.version>
 		<webauthn.version>2.10.1</webauthn.version>
-		<anthropic.version>3.3.0</anthropic.version>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -79,10 +78,9 @@
 			<version>${webauthn.version}</version>
 		</dependency>
 		<dependency>
-			<!-- AI comment suggestion (optional: only used when ANTHROPIC_API_KEY is set) -->
-			<groupId>com.anthropic</groupId>
-			<artifactId>anthropic-java</artifactId>
-			<version>${anthropic.version}</version>
+			<!-- Website logos: fetched by the server with a safe DNS check (version from Spring Boot) -->
+			<groupId>org.apache.httpcomponents.client5</groupId>
+			<artifactId>httpclient5</artifactId>
 		</dependency>
 		<dependency>
 			<groupId>org.springdoc</groupId>

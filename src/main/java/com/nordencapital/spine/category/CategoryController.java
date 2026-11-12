@@ -28,6 +28,7 @@ import com.nordencapital.spine.auth.AuthUser;
 import com.nordencapital.spine.common.ApiError;
 import com.nordencapital.spine.common.Names;
 import com.nordencapital.spine.common.ParentPatch;
+import com.nordencapital.spine.common.Websites;
 import tools.jackson.databind.JsonNode;
 
 @Tag(name = "Categories", description = "Everyone reads active categories. /api/admin/categories is for OWNER and "
@@ -72,12 +73,13 @@ public class CategoryController {
 	@PostMapping("/api/admin/categories")
 	public ResponseEntity<CategoryResponse> create(@AuthenticationPrincipal AuthUser actor,
 			@Valid @RequestBody CreateRequest body) {
-		return ResponseEntity.status(HttpStatus.CREATED).body(this.service.create(actor, body.name(), body.icon(), body.parentId()));
+		return ResponseEntity.status(HttpStatus.CREATED).body(this.service.create(actor, body.name(), body.icon(), body.parentId(),
+				body.website()));
 	}
 
 	@Operation(summary = "Change the name, icon and/or parent",
 			description = "name/icon: leave out (or null) to keep. parentId: leave out to keep, null = top level, an "
-					+ "id = move under that category.")
+					+ "id = move under that category. website: leave out to keep, null or \"\" = remove.")
 	@ApiResponse(responseCode = "200", description = "Saved")
 	@ApiResponse(responseCode = "400", description = "validation_error",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
@@ -88,7 +90,8 @@ public class CategoryController {
 	@PatchMapping("/api/admin/categories/{id}")
 	public CategoryResponse update(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody UpdateRequest body) {
-		return this.service.update(actor, id, body.name(), body.icon(), ParentPatch.of(body.parentId()));
+		return this.service.update(actor, id, body.name(), body.icon(), ParentPatch.of(body.parentId()),
+				Websites.patch(body.website()));
 	}
 
 	@Operation(summary = "Archive a category", description = "Hidden from GET /api/categories. Old data keeps it.")
@@ -114,7 +117,9 @@ public class CategoryController {
 			@NotBlank @Size(max = Names.MAX_LENGTH) @Pattern(regexp = Names.NO_CONTROL_CHARS,
 					message = "must not contain control characters") String name,
 			@Schema(description = "One of GET /api/categories/icons") @NotNull String icon,
-			@Schema(nullable = true, description = "A top-level category, or null") UUID parentId) {
+			@Schema(nullable = true, description = "A top-level category, or null") UUID parentId,
+			@Schema(nullable = true, description = "Optional website (logo), e.g. \"claude.ai\"; stored as the bare "
+					+ "domain") @Size(max = Websites.MAX_INPUT) String website) {
 
 		public CreateRequest {
 			name = Names.clean(name);
@@ -128,7 +133,9 @@ public class CategoryController {
 					message = "must not contain control characters") String name,
 			@Schema(nullable = true, description = "One of GET /api/categories/icons") String icon,
 			@Schema(nullable = true, type = "string", format = "uuid",
-					description = "Leave out = keep; null = top level; an id = move under it") JsonNode parentId) {
+					description = "Leave out = keep; null = top level; an id = move under it") JsonNode parentId,
+			@Schema(nullable = true, type = "string",
+					description = "Leave out = keep; null or \"\" = remove; text = set") JsonNode website) {
 
 		public UpdateRequest {
 			name = Names.clean(name);

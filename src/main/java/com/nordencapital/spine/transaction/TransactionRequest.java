@@ -10,6 +10,7 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 import com.nordencapital.spine.common.Names;
+import com.nordencapital.spine.common.Websites;
 
 /**
  * Body of POST and PUT /api/transactions (PUT replaces everything). The description is
@@ -33,6 +34,9 @@ public record TransactionRequest(
 		@Schema(description = "0 to 10 active tags (archived ones already on it can stay)", nullable = true)
 		@Size(max = TransactionService.MAX_TAGS) List<UUID> tagIds,
 		@Schema(description = "1 to 5 proof files: your new uploads, or files already on it") List<UUID> fileIds,
+		@Schema(description = "Optional website, e.g. \"claude.ai\" or \"https://www.google.com/x\". Stored as the "
+				+ "bare domain (\"google.com\"). Empty or null = none.", nullable = true, example = "claude.ai")
+		@Size(max = Websites.MAX_INPUT) String website,
 		@Schema(description = "Create only: true = save even if a transaction with the same type, amount, currency "
 				+ "and date exists", nullable = true) Boolean confirmDuplicate) {
 

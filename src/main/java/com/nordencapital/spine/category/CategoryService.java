@@ -21,6 +21,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.nordencapital.spine.auth.AuthUser;
 import com.nordencapital.spine.common.ApiException;
+import com.nordencapital.spine.common.Websites;
+import com.nordencapital.spine.logo.LogoService;
 import com.nordencapital.spine.common.CategoryTree;
 import com.nordencapital.spine.common.ParentPatch;
 import com.nordencapital.spine.user.Actors;
@@ -47,12 +49,16 @@ public class CategoryService {
 
 	private final JdbcTemplate jdbc;
 
+	private final LogoService logos;
+
 	private final Clock clock;
 
-	public CategoryService(CategoryRepository categories, Actors actors, JdbcTemplate jdbc, Clock clock) {
+	public CategoryService(CategoryRepository categories, Actors actors, JdbcTemplate jdbc, LogoService logos,
+			Clock clock) {
 		this.categories = categories;
 		this.actors = actors;
 		this.jdbc = jdbc;
+		this.logos = logos;
 		this.clock = clock;
 	}
 
@@ -66,10 +72,12 @@ public class CategoryService {
 		List<Category> all = this.categories.findAll();
 		Map<UUID, Category> byId = all.stream().collect(Collectors.toMap(Category::getId, Function.identity()));
 		Map<UUID, Long> usage = usage();
+		Map<String, String> logoUrls = logoUrls(all);
 		return all.stream()
 			.filter((category) -> isPickable(category, byId))
 			.map((category) -> new CategoryPick(category.getId(), category.getName(), category.getIcon(), false,
-					category.getParentId(), usage.getOrDefault(category.getId(), 0L)))
+					category.getParentId(), category.getWebsite(), logoUrls.get(category.getWebsite()),
+					usage.getOrDefault(category.getId(), 0L)))
 			.sorted(Comparator.comparingLong(CategoryPick::usageCount)
 				.reversed()
 				.thenComparing(CategoryPick::name, String.CASE_INSENSITIVE_ORDER))
@@ -80,7 +88,9 @@ public class CategoryService {
 	@Transactional(readOnly = true)
 	public List<CategoryResponse> all(AuthUser principal) {
 		this.actors.manager(principal);
-		return this.categories.findAllByOrderByNameAsc().stream().map(CategoryResponse::from).toList();
+		List<Category> all = this.categories.findAllByOrderByNameAsc();
+		Map<String, String> logoUrls = logoUrls(all);
+		return all.stream().map((category) -> CategoryResponse.from(category, logoUrls)).toList();
 	}
 
 	/**
@@ -89,9 +99,10 @@ public class CategoryService {
 	 * parent)
 	 */
 	@Transactional
-	public CategoryResponse create(AuthUser principal, String name, String icon, UUID parentId) {
+	public CategoryResponse create(AuthUser principal, String name, String icon, UUID parentId, String website) {
 		this.actors.manager(principal);
 		CategoryIcons.check(icon);
+		String domain = Websites.normalize(website);
 		CategoryTree.checkParent(null, parentId, false, this::node);
 		if (this.categories.findByNameIgnoreCase(name).isPresent()) {
 			throw nameTaken();
@@ -99,7 +110,10 @@ public class CategoryService {
 		Integer max = this.categories.maxSortOrderBelow(LAST_SORT_ORDER);
 		int sortOrder = Math.min(((max != null) ? max : 0) + SORT_STEP, LAST_SORT_ORDER - 1);
 		Category category = Category.create(name, icon, parentId, sortOrder, this.clock.instant());
-		return CategoryResponse.from(saveFlush(category));
+		if (domain != null) {
+			category.changeWebsite(domain, this.clock.instant());
+		}
+		return response(saveFlush(category));
 	}
 
 	/**
@@ -108,7 +122,8 @@ public class CategoryService {
 	 * {@code validation_error}
 	 */
 	@Transactional
-	public CategoryResponse update(AuthUser principal, UUID id, String name, String icon, ParentPatch parent) {
+	public CategoryResponse update(AuthUser principal, UUID id, String name, String icon, ParentPatch parent,
+			Websites.Patch website) {
 		this.actors.manager(principal);
 		Category category = find(id);
 		if (name != null) {
@@ -128,7 +143,10 @@ public class CategoryService {
 			CategoryTree.checkParent(id, parent.parentId(), this.categories.existsByParentId(id), this::node);
 			category.moveTo(parent.parentId(), this.clock.instant());
 		}
-		return CategoryResponse.from(saveFlush(category));
+		if (website.given() && !java.util.Objects.equals(website.domain(), category.getWebsite())) {
+			category.changeWebsite(website.domain(), this.clock.instant());
+		}
+		return response(saveFlush(category));
 	}
 
 	/**
@@ -142,7 +160,7 @@ public class CategoryService {
 		if (category.isArchived() != archived) {
 			category.setArchived(archived, this.clock.instant());
 		}
-		return CategoryResponse.from(category);
+		return response(category);
 	}
 
 	/**
@@ -168,6 +186,16 @@ public class CategoryService {
 					usage.put(rs.getObject("category_id", UUID.class), rs.getLong("n"));
 				}, Date.valueOf(since));
 		return usage;
+	}
+
+	/** Response of one saved category; starts fetching its logo in the background. */
+	private CategoryResponse response(Category category) {
+		this.logos.prefetch(category.getWebsite());
+		return CategoryResponse.from(category, logoUrls(List.of(category)));
+	}
+
+	private Map<String, String> logoUrls(List<Category> categories) {
+		return this.logos.logoUrls(categories.stream().map(Category::getWebsite).toList());
 	}
 
 	private Optional<CategoryTree.Node> node(UUID id) {

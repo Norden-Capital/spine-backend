@@ -39,6 +39,25 @@ public class LoginEvents {
 				userId, Timestamp.from(from));
 	}
 
+	/**
+	 * The last successful login before {@code before} (not included), or null.
+	 * @param before null = before the newest successful login
+	 */
+	public Instant previousSuccess(UUID userId, Instant before) {
+		List<Instant> found = (before != null)
+				? this.jdbc.query("SELECT max(created_at) AS at FROM login_events WHERE user_id = ? AND success "
+						+ "AND created_at < ?", (rs, rowNum) -> toInstant(rs.getTimestamp("at")), userId,
+						Timestamp.from(before.truncatedTo(java.time.temporal.ChronoUnit.MICROS)))
+				: this.jdbc.query("SELECT created_at AS at FROM login_events WHERE user_id = ? AND success "
+						+ "ORDER BY created_at DESC OFFSET 1 LIMIT 1", (rs, rowNum) -> toInstant(rs.getTimestamp("at")),
+						userId);
+		return found.isEmpty() ? null : found.get(0);
+	}
+
+	private static Instant toInstant(Timestamp timestamp) {
+		return (timestamp != null) ? timestamp.toInstant() : null;
+	}
+
 	public record Attempt(Instant at, boolean success) {
 	}
 

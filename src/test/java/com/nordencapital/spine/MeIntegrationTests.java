@@ -68,6 +68,27 @@ class MeIntegrationTests extends IntegrationTestBase {
 	}
 
 	@Test
+	void previousLoginIsTheOneBeforeThisSession() {
+		User user = activeUser("emp@example.com", Role.EMPLOYEE);
+		Client first = loggedIn("emp@example.com");
+		assertThat(first.get("/api/me")).bodyJson().extractingPath("$.previousLoginAt").isNull();
+		java.time.Instant firstLogin = this.jdbc.queryForObject(
+				"SELECT created_at FROM login_events WHERE success", java.sql.Timestamp.class).toInstant();
+
+		// A failed try does not count.
+		assertThat(client().post("/api/auth/login", "{\"email\":\"emp@example.com\",\"password\":\"wrong-password\"}"))
+			.hasStatus(HttpStatus.UNAUTHORIZED);
+		Client second = loggedIn("emp@example.com");
+		MvcTestResult me = second.get("/api/me");
+		assertThat(me).bodyJson().extractingPath("$.previousLoginAt").isEqualTo(firstLogin.toString());
+		assertThat(me).bodyJson().extractingPath("$.lastLoginAt")
+			.isEqualTo(reload(user.getId()).getLastLoginAt().toString());
+
+		// The first session still sees the login before IT (none), not the newer one.
+		assertThat(first.get("/api/me")).bodyJson().extractingPath("$.previousLoginAt").isNull();
+	}
+
+	@Test
 	void namesAreTrimmedAndShownInAuthMe() {
 		User user = activeUser("emp@example.com", Role.EMPLOYEE);
 		User other = activeUser("other@example.com", Role.EMPLOYEE);

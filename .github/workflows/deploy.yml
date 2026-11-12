@@ -63,7 +63,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Copy compose file to the server
+      - name: Copy compose file and backup script to the server
         uses: appleboy/scp-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -71,7 +71,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           fingerprint: ${{ secrets.VPS_HOST_FINGERPRINT }}
-          source: deploy/compose.prod.yaml
+          source: deploy/compose.prod.yaml,deploy/backup.sh
           target: /opt/spine
           strip_components: 1
 

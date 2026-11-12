@@ -18,7 +18,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Module 5, company side: filters and paging, subcategories, usage order, duplicate
- * warning, comments, AI switched off.
+ * warning, comments.
  */
 class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 
@@ -279,18 +279,6 @@ class SearchAndCommentsIntegrationTests extends IntegrationTestBase {
 		// Trashed transaction: 404.
 		a.delete("/api/transactions/" + id);
 		assertThat(a.get("/api/transactions/" + id + "/comments")).hasStatus(HttpStatus.NOT_FOUND);
-	}
-
-	// ---- F. AI off ----
-
-	@Test
-	void aiIsOffWithoutKey() {
-		activeUser("ada@example.com", Role.EMPLOYEE);
-		Client a = loggedIn("ada@example.com");
-		assertThat(a.get("/api/features")).bodyJson().extractingPath("$.ai").isEqualTo(false);
-		MvcTestResult result = a.post("/api/ai/suggest-comment", "{\"draft\":{\"description\":\"Taxi\"}}");
-		assertThat(result).hasStatus(HttpStatus.SERVICE_UNAVAILABLE);
-		assertThat(result).bodyJson().extractingPath("$.error").isEqualTo("ai_disabled");
 	}
 
 	// ---- helpers ----

@@ -27,6 +27,10 @@ public class Category {
 	@Column(name = "sort_order", nullable = false)
 	private int sortOrder;
 
+	/** Bare domain like "claude.ai" (its logo is shown), or null. */
+	@Column(length = 253)
+	private String website;
+
 	/** Null = top level. One level only. */
 	@Column(name = "parent_id")
 	private UUID parentId;
@@ -74,6 +78,15 @@ public class Category {
 
 	public UUID getParentId() {
 		return this.parentId;
+	}
+
+	public String getWebsite() {
+		return this.website;
+	}
+
+	void changeWebsite(String website, Instant now) {
+		this.website = website;
+		this.updatedAt = now;
 	}
 
 	void moveTo(UUID parentId, Instant now) {

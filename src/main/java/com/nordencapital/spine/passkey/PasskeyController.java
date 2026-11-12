@@ -70,14 +70,16 @@ public class PasskeyController {
 	public ResponseEntity<PasskeyResponse> register(@AuthenticationPrincipal AuthUser actor,
 			@Valid @RequestBody RegisterRequest body, HttpServletRequest request) {
 		PasskeyResponse created = this.service.register(actor, request.getSession(), body.name(),
-				body.credential().toString());
+				body.credential().toString(), SessionLogin.loginPasskey(request));
 		return ResponseEntity.status(HttpStatus.CREATED).body(created);
 	}
 
-	@Operation(summary = "My passkeys")
+	@Operation(summary = "My passkeys",
+			description = "current = true only for the passkey used to log in this session (all false after a "
+					+ "password login).")
 	@GetMapping("/api/me/passkeys")
-	public List<PasskeyResponse> list(@AuthenticationPrincipal AuthUser actor) {
-		return this.service.list(actor);
+	public List<PasskeyResponse> list(@AuthenticationPrincipal AuthUser actor, HttpServletRequest request) {
+		return this.service.list(actor, SessionLogin.loginPasskey(request));
 	}
 
 	@Operation(summary = "Rename one of my passkeys")
@@ -86,8 +88,8 @@ public class PasskeyController {
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
 	@PatchMapping("/api/me/passkeys/{id}")
 	public PasskeyResponse rename(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
-			@Valid @RequestBody RenameRequest body) {
-		return this.service.rename(actor, id, body.name());
+			@Valid @RequestBody RenameRequest body, HttpServletRequest request) {
+		return this.service.rename(actor, id, body.name(), SessionLogin.loginPasskey(request));
 	}
 
 	@Operation(summary = "Delete one of my passkeys")
@@ -118,9 +120,10 @@ public class PasskeyController {
 	@PostMapping("/api/auth/passkey/login")
 	public MeResponse login(@Valid @RequestBody LoginRequest body, HttpServletRequest request,
 			HttpServletResponse response) {
-		User user = this.service.login(request.getSession(), body.credential().toString(), request.getRemoteAddr());
-		this.sessionLogin.start(user, request, response);
-		return MeResponse.from(user);
+		PasskeyService.LoggedIn loggedIn = this.service.login(request.getSession(), body.credential().toString(),
+				request.getRemoteAddr());
+		this.sessionLogin.start(loggedIn.user(), loggedIn.passkeyId(), request, response);
+		return MeResponse.from(loggedIn.user());
 	}
 
 	/** The name is trimmed before validation; empty = "Passkey". */
