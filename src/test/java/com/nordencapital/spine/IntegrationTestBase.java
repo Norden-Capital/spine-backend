@@ -1,5 +1,7 @@
 package com.nordencapital.spine;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -19,6 +21,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -70,7 +73,12 @@ public abstract class IntegrationTestBase {
 	protected CapturingMailSender mails;
 
 	@BeforeEach
-	void cleanDatabase() {
+	void cleanDatabase() throws IOException {
+		this.jdbc.update("DELETE FROM tags");
+		this.jdbc.update("DELETE FROM categories");
+		// Back to the 7 starting categories, with the same SQL as the migration.
+		this.jdbc.execute(new ClassPathResource("db/migration/V9__seed_categories.sql")
+			.getContentAsString(StandardCharsets.UTF_8));
 		this.jdbc.update("DELETE FROM spring_session");
 		this.jdbc.update("DELETE FROM auth_tokens");
 		this.jdbc.update("DELETE FROM login_events");

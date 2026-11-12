@@ -44,15 +44,18 @@ public class UserAdminService {
 
 	private final SignInHistory signInHistory;
 
+	private final Actors actors;
+
 	private final Clock clock;
 
 	public UserAdminService(UserRepository users, AuthTokenService tokens, AuthMails mails, UserSessions sessions,
-			SignInHistory signInHistory, Clock clock) {
+			SignInHistory signInHistory, Actors actors, Clock clock) {
 		this.users = users;
 		this.tokens = tokens;
 		this.mails = mails;
 		this.sessions = sessions;
 		this.signInHistory = signInHistory;
+		this.actors = actors;
 		this.clock = clock;
 	}
 
@@ -187,10 +190,7 @@ public class UserAdminService {
 	 * The caller, loaded again. Only an ACTIVE OWNER or ADMIN may use this service.
 	 */
 	private User actor(AuthUser principal) {
-		return this.users.findById(principal.id())
-			.filter((user) -> user.getStatus() == UserStatus.ACTIVE)
-			.filter((user) -> user.getRole() == Role.OWNER || user.getRole() == Role.ADMIN)
-			.orElseThrow(() -> forbidden("You cannot do this"));
+		return this.actors.manager(principal);
 	}
 
 	private User visible(User actor, UUID id) {
