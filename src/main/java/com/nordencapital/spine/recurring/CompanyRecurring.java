@@ -549,7 +549,7 @@ public class CompanyRecurring {
 			return new Occurrence(o.id(), o.recurringId(), o.dueDate(), o.status(),
 					"DUE".equals(o.status()) && o.dueDate().isBefore(today), o.transactionId(), row.type(),
 					Totals.money(row.amount()), row.description(), views.category(row),
-					row.website(), views.logoUrl(row));
+					row.website(), views.logoUrls(row));
 		}).toList();
 	}
 
@@ -602,7 +602,7 @@ public class CompanyRecurring {
 				(rs.getDate("paused_until") != null) ? rs.getDate("paused_until").toLocalDate() : null);
 	}
 
-	private record Views(Map<UUID, Category> categories, Map<String, String> logoUrls,
+	private record Views(Map<UUID, Category> categories, Map<String, List<String>> logoUrls,
 			Map<UUID, java.util.Set<LocalDate>> skips, Map<UUID, Map<LocalDate, String>> occurrences, LocalDate today) {
 
 		CategoryRef category(Row row) {
@@ -613,10 +613,10 @@ public class CompanyRecurring {
 		}
 
 		/** Own website logo, then the category's, then the parent's (like transactions). */
-		String logoUrl(Row row) {
+		List<String> logoUrls(Row row) {
 			Category c = this.categories.get(row.categoryId());
 			Category parent = (c != null && c.getParentId() != null) ? this.categories.get(c.getParentId()) : null;
-			return LogoService.firstLogo(this.logoUrls, row.website(), (c != null) ? c.getWebsite() : null,
+			return LogoService.chain(this.logoUrls, row.website(), (c != null) ? c.getWebsite() : null,
 					(parent != null) ? parent.getWebsite() : null);
 		}
 
@@ -636,7 +636,7 @@ public class CompanyRecurring {
 										: "UPCOMING"))
 				.toList();
 			return new Recurring(row.id(), row.type(), Totals.money(row.amount()), row.description(),
-					category(row), row.website(), logoUrl(row), row.unit(), row.every(), row.startDate(), row.endDate(),
+					category(row), row.website(), logoUrls(row), row.unit(), row.every(), row.startDate(), row.endDate(),
 					nextDate, row.paused(), pausedUntil, dueCount, upcoming);
 		}
 
@@ -675,7 +675,7 @@ public class CompanyRecurring {
 	 * status DUE / DONE / SKIPPED once it exists
 	 */
 	public record Recurring(UUID id, String type, String amount, String description,
-			CategoryRef category, String website, String logoUrl, String unit, int every, LocalDate startDate,
+			CategoryRef category, String website, List<String> logoUrls, String unit, int every, LocalDate startDate,
 			LocalDate endDate, LocalDate nextDate, boolean paused, LocalDate pausedUntil, int dueCount,
 			List<Recurrence.Upcoming> upcoming) {
 	}
@@ -688,7 +688,7 @@ public class CompanyRecurring {
 	 */
 	public record Occurrence(UUID id, UUID recurringId, LocalDate dueDate, String status, boolean overdue,
 			UUID transactionId, String type, String amount, String description, CategoryRef category,
-			String website, String logoUrl) {
+			String website, List<String> logoUrls) {
 	}
 
 	/** Body of POST and PUT /api/admin/recurring. The description is trimmed. */

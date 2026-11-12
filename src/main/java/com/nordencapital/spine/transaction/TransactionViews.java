@@ -103,13 +103,13 @@ class TransactionViews {
 		Category category = lookups.categories().get(tx.getCategoryId());
 		Category parent = (category != null && category.getParentId() != null)
 				? lookups.categories().get(category.getParentId()) : null;
-		String logoUrl = LogoService.firstLogo(lookups.logoUrls(), tx.getWebsite(),
+		List<String> logoUrls = LogoService.chain(lookups.logoUrls(), tx.getWebsite(),
 				(category != null) ? category.getWebsite() : null, (parent != null) ? parent.getWebsite() : null);
 		CategoryRef categoryRef = (category != null) ? new CategoryRef(category.getId(), category.getName(),
 				category.getIcon(), category.isArchived(), category.getParentId(), category.getKind()) : null;
 		List<FileResponse> fileRefs = lookups.files().getOrDefault(tx.getId(), List.of());
 		return new TransactionResponse(tx.getId(), tx.getType(), money(tx.getAmount()),
-				tx.getDate(), tx.getDescription(), tx.getWebsite(), logoUrl, categoryRef, fileRefs,
+				tx.getDate(), tx.getDescription(), tx.getWebsite(), logoUrls, categoryRef, fileRefs,
 				userRef(lookups.users(), tx.getCreatedBy()), tx.getCreatedAt(),
 				userRef(lookups.users(), tx.getUpdatedBy()), tx.getUpdatedAt(), canEdit(tx, actor), canDelete(tx, actor));
 	}
@@ -174,7 +174,7 @@ class TransactionViews {
 	}
 
 	private record Lookups(Map<UUID, User> users, Map<UUID, Category> categories,
-			Map<UUID, List<FileResponse>> files, Map<String, String> logoUrls) {
+			Map<UUID, List<FileResponse>> files, Map<String, List<String>> logoUrls) {
 	}
 
 }

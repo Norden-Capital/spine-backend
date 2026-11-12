@@ -48,12 +48,12 @@ class LogoSafetyTests {
 			looked.add(host);
 			return new InetAddress[] { InetAddress.getByName("127.0.0.1") };
 		});
-		assertThat(fetcher.fetch("rebind.example.com")).isEmpty();
+		assertThat(fetcher.lookUp("rebind.example.com").pageRead()).isFalse();
 		assertThat(looked).isNotEmpty().allMatch("rebind.example.com"::equals);
 
 		HttpLogoFetcher metadata = new HttpLogoFetcher(
 				(host) -> new InetAddress[] { InetAddress.getByName("169.254.169.254") });
-		assertThat(metadata.fetch("metadata.example.com")).isEmpty();
+		assertThat(metadata.lookUp("metadata.example.com").pageRead()).isFalse();
 	}
 
 	@Test
@@ -66,35 +66,6 @@ class LogoSafetyTests {
 				"http://[::1]/", "http://user@example.com/", "gopher://example.com/" }) {
 			assertThat(HttpLogoFetcher.allowed(URI.create(bad))).as(bad).isFalse();
 		}
-	}
-
-	@Test
-	void acceptsOnlyRealImagesAndReadsTheirSize() {
-		byte[] png = new byte[33];
-		System.arraycopy(new byte[] { (byte) 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 'I', 'H', 'D',
-				'R', 0, 0, 0, (byte) 180, 0, 0, 0, (byte) 180 }, 0, png, 0, 24);
-		ImageInfo info = ImageInfo.detect(png);
-		assertThat(info).isEqualTo(new ImageInfo("image/png", 180, 180));
-		assertThat(info.isSquare()).isTrue();
-
-		byte[] ico = new byte[6 + 32];
-		ico[2] = 1;
-		ico[4] = 2;
-		ico[6] = 16;
-		ico[7] = 16;
-		ico[22] = 0; // 256
-		ico[23] = 0;
-		assertThat(ImageInfo.detect(ico)).isEqualTo(new ImageInfo("image/x-icon", 256, 256));
-
-		assertThat(ImageInfo.detect("<svg xmlns=\"http://www.w3.org/2000/svg\"><script>x</script></svg>"
-			.getBytes(StandardCharsets.UTF_8))).isNull();
-		assertThat(ImageInfo.detect("<!doctype html><html></html>".getBytes(StandardCharsets.UTF_8))).isNull();
-		assertThat(ImageInfo.detect(new byte[3])).isNull();
-
-		ImageInfo wide = new ImageInfo("image/png", 400, 100);
-		ImageInfo small = new ImageInfo("image/png", 32, 32);
-		assertThat(HttpLogoFetcher.better(small, wide)).isTrue();
-		assertThat(HttpLogoFetcher.better(new ImageInfo("image/png", 192, 192), small)).isTrue();
 	}
 
 	@Test
@@ -133,24 +104,12 @@ class LogoSafetyTests {
 	}
 
 	@Test
-	void acceptsOnlyPlainSvgDrawings() {
-		String plain = "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">"
-				+ "<path style=\"fill:#000\" d=\"M0 0h24v24H0z\"/></svg>";
-		assertThat(ImageInfo.detect(plain.getBytes(StandardCharsets.UTF_8)))
-			.isEqualTo(new ImageInfo("image/svg+xml", ImageInfo.SVG_SIZE, ImageInfo.SVG_SIZE));
-		for (String bad : new String[] { "<svg><script>alert(1)</script></svg>", "<svg onload=\"alert(1)\"></svg>",
-				"<svg><a href=\"javascript:alert(1)\">x</a></svg>", "<svg><image href=\"https://evil.example/x.png\"/></svg>",
-				"<svg><foreignObject><p>x</p></foreignObject></svg>", "<svg><style>@import url(//evil.example/a.css);</style></svg>",
-				"<!DOCTYPE svg [<!ENTITY x \"y\">]><svg></svg>", "<svg>not closed" }) {
-			assertThat(ImageInfo.detect(bad.getBytes(StandardCharsets.UTF_8))).as(bad).isNull();
-		}
-	}
-
-	@Test
 	void saysWhyNothingWasFound() {
 		HttpLogoFetcher fetcher = new HttpLogoFetcher((host) -> new InetAddress[] { InetAddress.getByName("10.0.0.7") });
-		assertThat(fetcher.fetch("inside.example.com")).isEmpty();
-		assertThat(fetcher.lastFailure()).contains("inside.example.com/ refused: private address");
+		LogoFetcher.Lookup lookup = fetcher.lookUp("inside.example.com");
+		assertThat(lookup.pageRead()).isFalse();
+		assertThat(lookup.iconUrl()).isNull();
+		assertThat(lookup.reason()).contains("inside.example.com/ refused: private address");
 	}
 
 }

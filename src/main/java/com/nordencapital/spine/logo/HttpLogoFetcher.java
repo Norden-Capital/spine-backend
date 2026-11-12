@@ -9,10 +9,8 @@ import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Optional;
-import java.util.Set;
 import java.util.regex.Pattern;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
@@ -33,14 +31,12 @@ import org.springframework.stereotype.Component;
 import com.nordencapital.spine.common.Websites;
 
 /**
- * Fetches a site's logo ourselves (no third-party logo service, so nobody else learns
- * what we pay for). Order: icon links in the home page (biggest first), then
- * /favicon.ico. The biggest square image wins.
+ * Reads a site's home page (and its web app manifest) to find the icon URL it declares.
+ * The image itself is loaded by the browser, not by the server (many sites block servers).
  * <p>
  * SSRF guards: http/https only, ports 80/443 only, no IP literals, DNS answers with any
  * non-public address are refused (on every hop: {@link SafeDns}), at most 3 redirects,
- * 5 s connect/read timeouts and a 20 s budget per domain, at most 1 MB per response,
- * only PNG/JPEG/WebP/ICO images and plain SVG drawings (checked from the bytes), no
+ * 5 s connect/read timeouts and a 20 s budget per domain, at most 1 MB per response, no
  * proxy, no cookies. Compressed (gzip) answers are unpacked by the client.
  */
 @Component
@@ -54,17 +50,12 @@ class HttpLogoFetcher implements LogoFetcher, DisposableBean {
 
 	private static final Duration BUDGET = Duration.ofSeconds(20);
 
-	private static final int MAX_CANDIDATES = 8;
-
 	/** A common browser identity: many sites refuse unknown clients. */
 	static final String USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
 			+ "Chrome/131.0.0.0 Safari/537.36";
 
 	/** What went wrong in the current fetch (one list per thread). */
 	private final ThreadLocal<java.util.List<String>> failures = ThreadLocal.withInitial(java.util.ArrayList::new);
-
-	/** A square logo this big is good enough: stop looking. */
-	private static final int GOOD_SIZE = 128;
 
 	private static final Pattern IPV4 = Pattern.compile("[0-9.]+");
 
@@ -105,74 +96,43 @@ class HttpLogoFetcher implements LogoFetcher, DisposableBean {
 	}
 
 	@Override
-	public Optional<Logo> fetch(String domain) {
+	public Lookup lookUp(String domain) {
 		if (!Websites.isDomain(domain)) {
-			return Optional.empty();
+			return new Lookup(false, null, "not a domain");
 		}
 		this.failures.get().clear();
 		Instant deadline = Instant.now().plus(BUDGET);
-		URI home = URI.create("https://" + domain + "/");
-		Optional<Body> page = get(home, false, deadline);
+		Optional<Body> page = get(URI.create("https://" + domain + "/"), false, deadline);
 		if (page.isEmpty()) {
 			page = get(URI.create("http://" + domain + "/"), false, deadline);
 		}
-		Set<URI> candidates = new LinkedHashSet<>();
-		URI base = page.map(Body::uri).orElse(home);
-		java.util.List<IconLinks.Candidate> declared = new java.util.ArrayList<>();
-		page.ifPresent((body) -> {
-			String html = new String(body.data(), StandardCharsets.UTF_8);
-			declared.addAll(IconLinks.parse(html, body.uri()));
-			URI manifest = IconLinks.manifest(html, body.uri());
-			if (manifest != null) {
-				get(manifest, false, deadline).ifPresent((json) -> declared
-					.addAll(IconLinks.manifestIcons(new String(json.data(), StandardCharsets.UTF_8), json.uri())));
-			}
-		});
-		declared.sort(java.util.Comparator.comparingInt(IconLinks.Candidate::declaredSize).reversed());
-		declared.forEach((candidate) -> candidates.add(candidate.uri()));
-		candidates.add(base.resolve("/apple-touch-icon.png"));
-		candidates.add(base.resolve("/favicon.ico"));
-		candidates.add(home.resolve("/apple-touch-icon.png"));
-		candidates.add(home.resolve("/favicon.ico"));
-
-		Logo best = null;
-		ImageInfo bestInfo = null;
-		for (URI uri : candidates.stream().limit(MAX_CANDIDATES).toList()) {
-			Optional<Body> image = get(uri, true, deadline);
-			ImageInfo info = image.map((body) -> ImageInfo.detect(body.data())).orElse(null);
-			if (info == null) {
-				if (image.isPresent()) {
-					fail(uri, "not an image");
-				}
-				continue;
-			}
-			if (bestInfo == null || better(info, bestInfo)) {
-				best = new Logo(info.contentType(), image.get().data());
-				bestInfo = info;
-			}
-			if (bestInfo.isSquare() && bestInfo.size() >= GOOD_SIZE) {
-				break;
-			}
+		if (page.isEmpty()) {
+			return new Lookup(false, null, lastFailure());
 		}
-		return Optional.ofNullable(best);
+		String html = new String(page.get().data(), StandardCharsets.UTF_8);
+		java.util.List<IconLinks.Candidate> declared = new java.util.ArrayList<>(IconLinks.parse(html, page.get().uri()));
+		URI manifest = IconLinks.manifest(html, page.get().uri());
+		if (manifest != null) {
+			get(manifest, false, deadline).ifPresent((json) -> declared
+				.addAll(IconLinks.manifestIcons(new String(json.data(), StandardCharsets.UTF_8), json.uri())));
+		}
+		declared.sort(java.util.Comparator.comparingInt(IconLinks.Candidate::declaredSize).reversed());
+		String best = declared.stream()
+			.map((candidate) -> candidate.uri().toString())
+			.filter(LogoService::isWebUrl)
+			.findFirst()
+			.orElse(null);
+		return new Lookup(true, best, (best == null) ? "the page declares no icon" : null);
 	}
 
-	@Override
-	public String lastFailure() {
+	/** Why the last lookup on this thread could not read the page. */
+	String lastFailure() {
 		java.util.List<String> list = this.failures.get();
-		return list.isEmpty() ? "no usable image" : String.join("; ", list.subList(0, Math.min(list.size(), 6)));
+		return list.isEmpty() ? "unknown" : String.join("; ", list.subList(0, Math.min(list.size(), 6)));
 	}
 
 	private void fail(URI uri, String why) {
 		this.failures.get().add(uri.getHost() + uri.getPath() + " " + why);
-	}
-
-	/** Square beats not square, then bigger beats smaller. */
-	static boolean better(ImageInfo a, ImageInfo b) {
-		if (a.isSquare() != b.isSquare()) {
-			return a.isSquare();
-		}
-		return a.size() > b.size();
 	}
 
 	/** True when we may connect to this URL at all (checked on every redirect). */

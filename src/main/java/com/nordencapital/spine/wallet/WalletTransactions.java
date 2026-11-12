@@ -290,7 +290,7 @@ public class WalletTransactions {
 		rows.values().stream().map(Row::website).filter(Objects::nonNull).forEach(domains::add);
 		categoriesById.values().stream().map(WalletCategories.Category::website).filter(Objects::nonNull)
 			.forEach(domains::add);
-		Map<String, String> logoUrls = this.logos.logoUrls(domains);
+		Map<String, List<String>> logoUrls = this.logos.logoUrls(domains);
 		List<WalletTx> result = new ArrayList<>();
 		for (UUID id : ids) {
 			Row row = rows.get(id);
@@ -300,12 +300,12 @@ public class WalletTransactions {
 			WalletCategories.Category category = categoriesById.get(row.categoryId());
 			WalletCategories.Category parent = (category != null && category.parentId() != null)
 					? categoriesById.get(category.parentId()) : null;
-			String logoUrl = LogoService.firstLogo(logoUrls, row.website(),
+			List<String> txLogoUrls = LogoService.chain(logoUrls, row.website(),
 					(category != null) ? category.website() : null, (parent != null) ? parent.website() : null);
 			CategoryRef categoryRef = (category != null) ? new CategoryRef(category.id(), category.name(),
 					category.icon(), category.archived(), category.parentId(), category.kind()) : null;
 			result.add(new WalletTx(id, row.type(), Totals.money(row.amount()), row.date(),
-					row.description(), row.website(), logoUrl, categoryRef, filesByTx.getOrDefault(id, List.of()), row.recurringId(),
+					row.description(), row.website(), txLogoUrls, categoryRef, filesByTx.getOrDefault(id, List.of()), row.recurringId(),
 					row.createdAt(), row.updatedAt()));
 		}
 		return result;
@@ -343,12 +343,12 @@ public class WalletTransactions {
 	/**
 	 * A wallet transaction as the API returns it.
 	 * @param website bare domain like "claude.ai", or null
-	 * @param logoUrl path of the website's logo, or null (show the category icon)
+	 * @param logoUrls logo image URLs to try in the browser, in order; empty = category icon
 	 * @param recurringId the recurring item that made it (null if added by hand)
 	 * @param updatedAt null if never changed
 	 */
 	public record WalletTx(UUID id, String type, String amount, LocalDate date, String description,
-			String website, String logoUrl, CategoryRef category, List<FileResponse> files, UUID recurringId, Instant createdAt,
+			String website, List<String> logoUrls, CategoryRef category, List<FileResponse> files, UUID recurringId, Instant createdAt,
 			Instant updatedAt) {
 	}
 

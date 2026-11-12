@@ -1,55 +1,47 @@
 package com.nordencapital.spine.logo;
 
+import java.net.URI;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
-import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
-import com.nordencapital.spine.auth.AuthUser;
-import com.nordencapital.spine.common.ApiException;
-import com.nordencapital.spine.common.Websites;
-import com.nordencapital.spine.user.Actors;
-import com.nordencapital.spine.user.User;
-
 /**
- * Logos of transaction websites, fetched once per domain and kept in the table logos.
- * A failure is kept too ("NONE") and tried again after a few days, so we never hammer a
- * site. Fetches run in the background (2 threads), one at a time per domain.
+ * Logo URLs of websites. The browser loads the image itself, straight from the brand's
+ * site (servers are often blocked, phones are not), trying the URLs in order and showing
+ * the category icon when none works. Per domain: the best icon the site declares in its
+ * home page (when our server could read it), then {@code /apple-touch-icon.png}, then
+ * {@code /favicon.ico}. The declared icon is looked up in the background, once per domain,
+ * and kept in the table logos (found: 30 days; page not readable: tried again after 1 day).
  */
 @Service
 public class LogoService implements DisposableBean {
 
-	/** A found logo is fetched again after this (lazily, on use). */
+	/** A looked-up domain is looked up again after this. */
 	static final Duration REFRESH_OK = Duration.ofDays(30);
 
-	/** A domain without a usable logo is tried again after this (short: sites change, fetches can fail). */
-	static final Duration RETRY_NONE = Duration.ofHours(1);
-
-	/** How long a first request waits for a fetch in progress. */
-	private static final Duration WAIT = Duration.ofSeconds(25);
+	/** A domain whose page could not be read is tried again after this. */
+	static final Duration RETRY_NONE = Duration.ofDays(1);
 
 	private static final Logger logger = LoggerFactory.getLogger(LogoService.class);
 
@@ -57,205 +49,154 @@ public class LogoService implements DisposableBean {
 
 	private final LogoFetcher fetcher;
 
-	private final Actors actors;
-
 	private final Clock clock;
 
 	private final ThreadPoolExecutor pool = new ThreadPoolExecutor(2, 2, 60, TimeUnit.SECONDS,
 			new ArrayBlockingQueue<>(200), (runnable) -> {
-				Thread thread = new Thread(runnable, "logo-fetch");
+				Thread thread = new Thread(runnable, "logo-lookup");
 				thread.setDaemon(true);
 				return thread;
 			});
 
-	private final Map<String, CompletableFuture<Void>> inFlight = new ConcurrentHashMap<>();
+	private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
 
-	public LogoService(JdbcTemplate jdbc, LogoFetcher fetcher, Actors actors, Clock clock) {
+	public LogoService(JdbcTemplate jdbc, LogoFetcher fetcher, Clock clock) {
 		this.jdbc = jdbc;
 		this.fetcher = fetcher;
-		this.actors = actors;
 		this.clock = clock;
 	}
 
-	/** API path of a domain's logo (relative, under /api). */
-	public static String path(String domain) {
-		return "/api/logos/" + domain;
+	/** The URLs every domain gets, even when its page cannot be read. */
+	public static List<String> fallbacks(String domain) {
+		return List.of("https://" + domain + "/apple-touch-icon.png", "https://" + domain + "/favicon.ico");
+	}
+
+	/** Only absolute http/https URLs (never data: or javascript:), at most 2048 characters. */
+	public static boolean isWebUrl(String url) {
+		if (url == null || url.length() > 2048) {
+			return false;
+		}
+		try {
+			URI uri = URI.create(url);
+			String scheme = (uri.getScheme() != null) ? uri.getScheme().toLowerCase(Locale.ROOT) : "";
+			return (scheme.equals("https") || scheme.equals("http")) && uri.getHost() != null;
+		}
+		catch (IllegalArgumentException ex) {
+			return false;
+		}
 	}
 
 	/**
-	 * logoUrl for each domain: null when we already know there is no logo (until the
-	 * retry time), else the logo path (the first request may fetch it).
+	 * Logo URLs for each domain (ordered, try one after the other). Domains never looked up
+	 * (or due again) are looked up in the background; until then they get the fallbacks.
 	 */
-	public Map<String, String> logoUrls(Collection<String> domains) {
+	public Map<String, List<String>> logoUrls(Collection<String> domains) {
 		Set<String> wanted = new HashSet<>(domains);
 		wanted.remove(null);
-		Map<String, String> urls = new HashMap<>(); // allows get(null)
+		Map<String, List<String>> urls = new HashMap<>(); // allows get(null)
 		if (wanted.isEmpty()) {
 			return urls;
 		}
-		Set<String> none = new HashSet<>(this.jdbc.queryForList(
-				"SELECT domain FROM logos WHERE status = 'NONE' AND retry_after > ? AND domain = ANY (?)", String.class,
-				Timestamp.from(this.clock.instant()), wanted.toArray(new String[0])));
-		wanted.stream().filter((domain) -> !none.contains(domain)).forEach((domain) -> urls.put(domain, path(domain)));
+		Instant now = this.clock.instant();
+		Map<String, String> declared = new HashMap<>();
+		Set<String> known = new HashSet<>();
+		this.jdbc.query("SELECT domain, icon_url, retry_after FROM logos WHERE domain = ANY (?)", (rs) -> {
+			String domain = rs.getString("domain");
+			if (rs.getTimestamp("retry_after").toInstant().isAfter(now)) {
+				known.add(domain);
+			}
+			if (isWebUrl(rs.getString("icon_url"))) {
+				declared.put(domain, rs.getString("icon_url"));
+			}
+		}, (Object) wanted.toArray(new String[0]));
+		for (String domain : wanted) {
+			List<String> list = new ArrayList<>();
+			if (declared.containsKey(domain)) {
+				list.add(declared.get(domain));
+			}
+			list.addAll(fallbacks(domain));
+			urls.put(domain, List.copyOf(new LinkedHashSet<>(list)));
+			if (!known.contains(domain)) {
+				start(domain);
+			}
+		}
 		return urls;
 	}
 
 	/**
-	 * The picture of a transaction: the first of these domains (its own website, then its
-	 * category's, then the parent category's) that has a logo, or null (category icon).
-	 * @param logoUrls from {@link #logoUrls} for all these domains
+	 * The logo URLs of a transaction or category: its own website first, then the other
+	 * websites (subcategory, main category), in order, without repeats. Empty = show the
+	 * category icon.
 	 */
-	public static String firstLogo(Map<String, String> logoUrls, String... domains) {
+	public static List<String> chain(Map<String, List<String>> logoUrls, String... domains) {
+		LinkedHashSet<String> all = new LinkedHashSet<>();
 		for (String domain : domains) {
-			String url = (domain != null) ? logoUrls.get(domain) : null;
-			if (url != null) {
-				return url;
+			if (domain != null) {
+				all.addAll(logoUrls.getOrDefault(domain, List.of()));
 			}
 		}
-		return null;
+		return List.copyOf(all);
 	}
 
-	/** Starts a background fetch if we have nothing fresh for this domain. Never blocks. */
+	/** Starts a background lookup if we have nothing fresh for this domain. Never blocks. */
 	public void prefetch(String domain) {
-		if (domain != null && find(domain).map((cached) -> cached.isDue(this.clock.instant())).orElse(true)) {
+		if (domain == null) {
+			return;
+		}
+		List<Timestamp> retry = this.jdbc.queryForList("SELECT retry_after FROM logos WHERE domain = ?",
+				Timestamp.class, domain);
+		if (retry.isEmpty() || !retry.get(0).toInstant().isAfter(this.clock.instant())) {
 			start(domain);
 		}
 	}
 
-	/**
-	 * The logo of a domain used on a company transaction or on one of my wallet
-	 * transactions. Fetches it on the first request.
-	 * @throws ApiException 404 {@code logo_not_found}
-	 */
-	public Cached get(AuthUser principal, String domain) {
-		User actor = this.actors.active(principal);
-		if (!Objects.equals(Websites.domainOrNull(domain), domain) || !isUsed(domain, actor)) {
-			throw notFound();
-		}
-		Instant now = this.clock.instant();
-		Optional<Cached> cached = find(domain);
-		if (cached.isPresent() && cached.get().isOk()) {
-			if (cached.get().isDue(now)) {
-				start(domain);
-			}
-			return cached.get();
-		}
-		if (cached.isPresent() && !cached.get().isDue(now)) {
-			throw notFound();
-		}
-		try {
-			start(domain).get(WAIT.toSeconds(), TimeUnit.SECONDS);
-		}
-		catch (InterruptedException ex) {
-			Thread.currentThread().interrupt();
-		}
-		catch (ExecutionException | TimeoutException ex) {
-			// treated as "no logo now"
-		}
-		return find(domain).filter(Cached::isOk).orElseThrow(LogoService::notFound);
-	}
-
-	private boolean isUsed(String domain, User actor) {
-		Boolean used = this.jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM transactions WHERE website = ?) "
-				+ "OR EXISTS (SELECT 1 FROM categories WHERE website = ?) "
-				+ "OR EXISTS (SELECT 1 FROM company_recurring WHERE website = ?) "
-				+ "OR EXISTS (SELECT 1 FROM wallet_transactions WHERE user_id = ? AND website = ?) "
-				+ "OR EXISTS (SELECT 1 FROM wallet_categories WHERE user_id = ? AND website = ?)", Boolean.class,
-				domain, domain, domain, actor.getId(), domain, actor.getId(), domain);
-		return Boolean.TRUE.equals(used);
-	}
-
-	Optional<Cached> find(String domain) {
-		List<Cached> rows = this.jdbc.query(
-				"SELECT status, content_type, data, retry_after FROM logos WHERE domain = ?",
-				(rs, row) -> new Cached(rs.getString("status"), rs.getString("content_type"), rs.getBytes("data"),
-						rs.getTimestamp("retry_after").toInstant()),
-				domain);
-		return rows.stream().findFirst();
-	}
-
-	/** One fetch per domain at a time; later callers share it. */
-	private CompletableFuture<Void> start(String domain) {
-		CompletableFuture<Void> mine = new CompletableFuture<>();
-		CompletableFuture<Void> running = this.inFlight.putIfAbsent(domain, mine);
-		if (running != null) {
-			return running;
+	/** One lookup per domain at a time. */
+	private void start(String domain) {
+		if (!this.inFlight.add(domain)) {
+			return;
 		}
 		try {
 			this.pool.execute(() -> {
 				try {
-					fetchAndStore(domain);
+					lookUpAndStore(domain);
 				}
 				finally {
-					this.inFlight.remove(domain, mine);
-					mine.complete(null);
+					this.inFlight.remove(domain);
 				}
 			});
 		}
 		catch (RejectedExecutionException ex) {
-			this.inFlight.remove(domain, mine);
-			mine.complete(null);
+			this.inFlight.remove(domain);
 		}
-		return mine;
 	}
 
-	private void fetchAndStore(String domain) {
+	void lookUpAndStore(String domain) {
 		Instant now = this.clock.instant();
-		Optional<LogoFetcher.Logo> logo;
+		LogoFetcher.Lookup lookup;
 		try {
-			logo = this.fetcher.fetch(domain);
+			lookup = this.fetcher.lookUp(domain);
 		}
 		catch (RuntimeException ex) {
-			logger.debug("Logo fetch failed for {}", domain, ex);
-			logo = Optional.empty();
+			lookup = new LogoFetcher.Lookup(false, null, ex.getClass().getSimpleName());
 		}
-		if (logo.isPresent()) {
-			logger.info("Logo {}: ok, {} {} bytes", domain, logo.get().contentType(), logo.get().data().length);
-		}
-		else {
-			logger.info("Logo {}: none ({})", domain, this.fetcher.lastFailure());
-		}
-		if (logo.isPresent()) {
-			save(domain, "OK", logo.get().contentType(), logo.get().data(), now, now.plus(REFRESH_OK));
-		}
-		else if (find(domain).map(Cached::isOk).orElse(false)) {
-			// A refresh failed: keep the old logo, try again later.
-			this.jdbc.update("UPDATE logos SET retry_after = ? WHERE domain = ?", Timestamp.from(now.plus(RETRY_NONE)),
-					domain);
+		String icon = isWebUrl(lookup.iconUrl()) ? lookup.iconUrl() : null;
+		if (icon != null) {
+			logger.info("Logo {}: icon {}", domain, icon);
 		}
 		else {
-			save(domain, "NONE", null, null, now, now.plus(RETRY_NONE));
+			logger.info("Logo {}: {} ({}), the browser tries /apple-touch-icon.png and /favicon.ico", domain,
+					lookup.pageRead() ? "no declared icon" : "page not readable", lookup.reason());
 		}
-	}
-
-	private void save(String domain, String status, String contentType, byte[] data, Instant now, Instant retryAfter) {
-		this.jdbc.update("INSERT INTO logos (domain, status, content_type, data, fetched_at, retry_after) "
-				+ "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (domain) DO UPDATE SET status = EXCLUDED.status, "
-				+ "content_type = EXCLUDED.content_type, data = EXCLUDED.data, fetched_at = EXCLUDED.fetched_at, "
-				+ "retry_after = EXCLUDED.retry_after", domain, status, contentType, data, Timestamp.from(now),
-				Timestamp.from(retryAfter));
-	}
-
-	private static ApiException notFound() {
-		return new ApiException(HttpStatus.NOT_FOUND, "logo_not_found", "No logo for this website");
+		this.jdbc.update("INSERT INTO logos (domain, status, icon_url, fetched_at, retry_after) VALUES (?, ?, ?, ?, ?) "
+				+ "ON CONFLICT (domain) DO UPDATE SET status = EXCLUDED.status, icon_url = EXCLUDED.icon_url, "
+				+ "fetched_at = EXCLUDED.fetched_at, retry_after = EXCLUDED.retry_after", domain,
+				lookup.pageRead() ? "OK" : "NONE", icon, Timestamp.from(now),
+				Timestamp.from(now.plus(lookup.pageRead() ? REFRESH_OK : RETRY_NONE)));
 	}
 
 	@Override
 	public void destroy() {
 		this.pool.shutdownNow();
-	}
-
-	/** A cached row: status OK (with image) or NONE. */
-	public record Cached(String status, String contentType, byte[] data, Instant retryAfter) {
-
-		public boolean isOk() {
-			return "OK".equals(this.status);
-		}
-
-		boolean isDue(Instant now) {
-			return !now.isBefore(this.retryAfter);
-		}
-
 	}
 
 }

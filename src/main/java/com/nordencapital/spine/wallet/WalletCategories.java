@@ -92,7 +92,7 @@ public class WalletCategories {
 		List<Category> all = all(userId);
 		Map<UUID, Category> byId = all.stream().collect(Collectors.toMap(Category::id, Function.identity()));
 		Map<UUID, Long> usage = usage(userId);
-		Map<String, String> logoUrls = logoUrls(all);
+		Map<String, List<String>> logoUrls = logoUrls(all);
 		return all.stream()
 			.filter((category) -> pickable(category, byId))
 			.filter((category) -> onlyKind == null || onlyKind.equals(category.kind()))
@@ -121,7 +121,7 @@ public class WalletCategories {
 			.stream()
 			.filter((category) -> onlyKind == null || onlyKind.equals(category.kind()))
 			.toList();
-		Map<String, String> logoUrls = logoUrls(all);
+		Map<String, List<String>> logoUrls = logoUrls(all);
 		return all.stream().map((category) -> category.pick(usage.getOrDefault(category.id(), 0L), logoUrls)).toList();
 	}
 
@@ -273,7 +273,7 @@ public class WalletCategories {
 		return category.pick(usageCount, logoUrls(List.of(category)));
 	}
 
-	private Map<String, String> logoUrls(List<Category> categories) {
+	private Map<String, List<String>> logoUrls(List<Category> categories) {
 		return this.logos.logoUrls(categories.stream().map(Category::website).toList());
 	}
 
@@ -363,9 +363,9 @@ public class WalletCategories {
 	record Category(UUID id, UUID parentId, String name, String icon, boolean archived, String website, int position,
 			String kind) {
 
-		Pick pick(long usageCount, Map<String, String> logoUrls) {
+		Pick pick(long usageCount, Map<String, List<String>> logoUrls) {
 			return new Pick(this.id, this.name, this.icon, this.kind, this.archived, this.parentId, this.position, this.website,
-					logoUrls.get(this.website), usageCount);
+					LogoService.chain(logoUrls, this.website), usageCount);
 		}
 
 	}
@@ -375,10 +375,10 @@ public class WalletCategories {
 	 * @param kind EXPENSE or INCOME
 	 * @param position 0-based order among its siblings
 	 * @param website bare domain, or null
-	 * @param logoUrl path of the website's logo, or null (show the icon)
+	 * @param logoUrls logo image URLs to try in the browser, in order; empty = show the icon
 	 */
 	public record Pick(UUID id, String name, String icon, String kind, boolean archived, UUID parentId, int position, String website,
-			String logoUrl, long usageCount) {
+			List<String> logoUrls, long usageCount) {
 	}
 
 }

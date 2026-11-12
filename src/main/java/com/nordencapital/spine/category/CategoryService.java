@@ -69,13 +69,13 @@ public class CategoryService {
 		List<Category> all = this.categories.findAll();
 		Map<UUID, Category> byId = all.stream().collect(Collectors.toMap(Category::getId, Function.identity()));
 		Map<UUID, Long> usage = usage();
-		Map<String, String> logoUrls = logoUrls(all);
+		Map<String, List<String>> logoUrls = logoUrls(all);
 		return all.stream()
 			.filter((category) -> isPickable(category, byId))
 			.filter((category) -> onlyKind == null || onlyKind.equals(category.getKind()))
 			.map((category) -> new CategoryPick(category.getId(), category.getName(), category.getIcon(),
 					category.getKind(), false,
-					category.getParentId(), category.getPosition(), category.getWebsite(), logoUrls.get(category.getWebsite()),
+					category.getParentId(), category.getPosition(), category.getWebsite(), LogoService.chain(logoUrls, category.getWebsite()),
 					usage.getOrDefault(category.getId(), 0L)))
 			.sorted(Comparator.comparingLong(CategoryPick::usageCount)
 				.reversed()
@@ -100,7 +100,7 @@ public class CategoryService {
 			.stream()
 			.filter((category) -> onlyKind == null || onlyKind.equals(category.getKind()))
 			.toList();
-		Map<String, String> logoUrls = logoUrls(all);
+		Map<String, List<String>> logoUrls = logoUrls(all);
 		return all.stream().map((category) -> CategoryResponse.from(category, logoUrls)).toList();
 	}
 
@@ -299,7 +299,7 @@ public class CategoryService {
 		return CategoryResponse.from(category, logoUrls(List.of(category)));
 	}
 
-	private Map<String, String> logoUrls(List<Category> categories) {
+	private Map<String, List<String>> logoUrls(List<Category> categories) {
 		return this.logos.logoUrls(categories.stream().map(Category::getWebsite).toList());
 	}
 

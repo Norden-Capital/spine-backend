@@ -7,5 +7,5 @@ import java.util.UUID;
  */
 public record CategoryPick(UUID id, String name, String icon, String kind, boolean archived, UUID parentId, int position,
 		String website,
-		String logoUrl, long usageCount) {
+		java.util.List<String> logoUrls, long usageCount) {
 }
