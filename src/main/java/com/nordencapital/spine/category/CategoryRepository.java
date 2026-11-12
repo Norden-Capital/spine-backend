@@ -15,6 +15,10 @@ public interface CategoryRepository extends JpaRepository<Category, UUID> {
 
 	Optional<Category> findByNameIgnoreCase(String name);
 
+	List<Category> findAllByOrderByNameAsc();
+
+	boolean existsByParentId(UUID parentId);
+
 	/** Highest sort order below the "last" ones (like Other), or null if none. */
 	@Query("SELECT max(c.sortOrder) FROM Category c WHERE c.sortOrder < :limit")
 	Integer maxSortOrderBelow(int limit);

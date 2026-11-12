@@ -11,6 +11,8 @@ public interface StoredFileRepository extends JpaRepository<StoredFile, UUID> {
 
 	List<StoredFile> findAllByTransactionIdInOrderByCreatedAtAsc(Collection<UUID> transactionIds);
 
-	List<StoredFile> findAllByTransactionIdIsNullAndCreatedAtBefore(Instant before);
+	List<StoredFile> findAllByTransactionIdIsNullAndWalletTransactionIdIsNullAndCreatedAtBefore(Instant before);
+
+	List<StoredFile> findAllByWalletTransactionIdInOrderByCreatedAtAsc(Collection<UUID> walletTransactionIds);
 
 }

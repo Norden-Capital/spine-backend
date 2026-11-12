@@ -27,6 +27,10 @@ public class Category {
 	@Column(name = "sort_order", nullable = false)
 	private int sortOrder;
 
+	/** Null = top level. One level only. */
+	@Column(name = "parent_id")
+	private UUID parentId;
+
 	@Column(name = "created_at", nullable = false)
 	private Instant createdAt;
 
@@ -36,8 +40,9 @@ public class Category {
 	protected Category() {
 	}
 
-	static Category create(String name, String icon, int sortOrder, Instant now) {
+	static Category create(String name, String icon, UUID parentId, int sortOrder, Instant now) {
 		Category category = new Category();
+		category.parentId = parentId;
 		category.id = UUID.randomUUID();
 		category.name = name;
 		category.icon = icon;
@@ -65,6 +70,15 @@ public class Category {
 
 	public int getSortOrder() {
 		return this.sortOrder;
+	}
+
+	public UUID getParentId() {
+		return this.parentId;
+	}
+
+	void moveTo(UUID parentId, Instant now) {
+		this.parentId = parentId;
+		this.updatedAt = now;
 	}
 
 	void rename(String name, Instant now) {

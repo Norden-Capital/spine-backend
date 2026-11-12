@@ -108,7 +108,7 @@ class TransactionViews {
 	private TransactionResponse toResponse(Transaction tx, User actor, Lookups lookups) {
 		Category category = lookups.categories().get(tx.getCategoryId());
 		CategoryRef categoryRef = (category != null) ? new CategoryRef(category.getId(), category.getName(),
-				category.getIcon(), category.isArchived()) : null;
+				category.getIcon(), category.isArchived(), category.getParentId()) : null;
 		List<TagRef> tagRefs = tx.getTagIds()
 			.stream()
 			.map(lookups.tags()::get)

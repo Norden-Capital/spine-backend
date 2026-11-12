@@ -18,7 +18,7 @@ public record TransactionResponse(UUID id, String type, String amount, String cu
 		String description, CategoryRef category, List<TagRef> tags, List<FileResponse> files, UserRef createdBy,
 		Instant createdAt, UserRef updatedBy, Instant updatedAt, boolean canDelete) {
 
-	public record CategoryRef(UUID id, String name, String icon, boolean archived) {
+	public record CategoryRef(UUID id, String name, String icon, boolean archived, UUID parentId) {
 	}
 
 	public record TagRef(UUID id, String name) {

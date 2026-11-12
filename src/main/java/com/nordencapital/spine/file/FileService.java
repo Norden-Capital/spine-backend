@@ -29,6 +29,8 @@ import com.nordencapital.spine.config.FilesProperties;
 import com.nordencapital.spine.user.Actors;
 import com.nordencapital.spine.user.Role;
 import com.nordencapital.spine.user.User;
+import com.nordencapital.spine.wallet.WalletLock;
+import jakarta.servlet.http.HttpSession;
 
 /**
  * Proof files: upload (checked by real content), serve to allowed users only, and delete
@@ -38,7 +40,9 @@ import com.nordencapital.spine.user.User;
  * <ul>
  * <li>attached to a transaction that is not in the trash: every logged-in user;</li>
  * <li>attached to a trashed transaction: OWNER and ADMIN only;</li>
- * <li>not attached yet: only the user who uploaded it.</li>
+ * <li>not attached yet: only the user who uploaded it;</li>
+ * <li>on a private wallet transaction: only its owner, and only while the wallet is
+ * unlocked (423 otherwise).</li>
  * </ul>
  * Anything else is "not found".
  */
@@ -63,14 +67,17 @@ public class FileService {
 
 	private final Clock clock;
 
+	private final WalletLock walletLock;
+
 	private final Path dir;
 
 	public FileService(StoredFileRepository files, Actors actors, JdbcTemplate jdbc, Clock clock,
-			FilesProperties properties) {
+			FilesProperties properties, WalletLock walletLock) {
 		this.files = files;
 		this.actors = actors;
 		this.jdbc = jdbc;
 		this.clock = clock;
+		this.walletLock = walletLock;
 		this.dir = Path.of(properties.dir()).toAbsolutePath().normalize();
 	}
 
@@ -121,9 +128,12 @@ public class FileService {
 	 * @throws ApiException 404 {@code file_not_found}
 	 */
 	@Transactional(readOnly = true)
-	public Download download(AuthUser principal, UUID id) {
+	public Download download(AuthUser principal, UUID id, HttpSession session) {
 		User user = this.actors.active(principal);
 		StoredFile file = this.files.findById(id).filter((f) -> canSee(user, f)).orElseThrow(FileService::notFound);
+		if (file.getWalletTransactionId() != null && !this.walletLock.isUnlocked(user.getId(), session)) {
+			throw new ApiException(HttpStatus.LOCKED, "wallet_locked", "Unlock the wallet with your PIN first");
+		}
 		Path path = this.dir.resolve(file.getStorageKey());
 		if (!Files.isRegularFile(path)) {
 			logger.error("File {} is in the database but missing on disk", file.getId());
@@ -139,8 +149,8 @@ public class FileService {
 	@Scheduled(initialDelayString = "PT10M", fixedDelayString = "PT1H")
 	@Transactional
 	public int deleteOldUnattached() {
-		List<StoredFile> old = this.files
-			.findAllByTransactionIdIsNullAndCreatedAtBefore(this.clock.instant().minus(UNATTACHED_TTL));
+		List<StoredFile> old = this.files.findAllByTransactionIdIsNullAndWalletTransactionIdIsNullAndCreatedAtBefore(
+				this.clock.instant().minus(UNATTACHED_TTL));
 		for (StoredFile file : old) {
 			this.files.delete(file);
 			deleteQuietly(this.dir.resolve(file.getStorageKey()));
@@ -151,8 +161,21 @@ public class FileService {
 		return old.size();
 	}
 
+	/**
+	 * Deletes files now: database rows and the bytes on disk (for hard-deleted wallet
+	 * transactions).
+	 */
+	@Transactional
+	public void deleteNow(List<StoredFile> toDelete) {
+		for (StoredFile file : toDelete) {
+			this.files.delete(file);
+			deleteQuietly(this.dir.resolve(file.getStorageKey()));
+		}
+	}
+
 	private boolean canSee(User user, StoredFile file) {
-		if (file.getTransactionId() == null) {
+		if (file.getWalletTransactionId() != null || file.getTransactionId() == null) {
+			// Private wallet files and new uploads: only their owner.
 			return file.getOwnerId().equals(user.getId());
 		}
 		Optional<Boolean> trashed = this.jdbc

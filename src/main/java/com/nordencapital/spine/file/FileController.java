@@ -9,6 +9,8 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
 
+import jakarta.servlet.http.HttpServletRequest;
+
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.CacheControl;
@@ -59,8 +61,9 @@ public class FileController {
 	@ApiResponse(responseCode = "404", description = "file_not_found",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
 	@GetMapping("/api/files/{id}")
-	public ResponseEntity<Resource> download(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id) {
-		FileService.Download download = this.service.download(actor, id);
+	public ResponseEntity<Resource> download(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
+			HttpServletRequest request) {
+		FileService.Download download = this.service.download(actor, id, request.getSession(false));
 		StoredFile file = download.file();
 		return ResponseEntity.ok()
 			.contentType(MediaType.parseMediaType(file.getContentType()))

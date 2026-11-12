@@ -53,6 +53,8 @@ services:
       APP_MAIL_FROM: ${APP_MAIL_FROM:?set APP_MAIL_FROM in .env}
       RESEND_API_KEY: ${RESEND_API_KEY:?set RESEND_API_KEY in .env}
       APP_BOOTSTRAP_ADMIN_EMAIL: ${APP_BOOTSTRAP_ADMIN_EMAIL:?set APP_BOOTSTRAP_ADMIN_EMAIL in .env}
+      # Optional: empty = AI comment suggestions are off.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       # Uploaded proof files (never public; only the API serves them to logged-in users).
       - files:/app/data

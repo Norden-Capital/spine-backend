@@ -37,9 +37,13 @@ public class StoredFile {
 	@Column(name = "created_at", nullable = false)
 	private Instant createdAt;
 
-	/** Null until the file is attached to a transaction. */
+	/** Null until the file is attached to a company transaction. */
 	@Column(name = "transaction_id")
 	private UUID transactionId;
+
+	/** Null unless the file is attached to a private wallet transaction. */
+	@Column(name = "wallet_transaction_id")
+	private UUID walletTransactionId;
 
 	protected StoredFile() {
 	}
@@ -89,12 +93,25 @@ public class StoredFile {
 		return this.transactionId;
 	}
 
+	public UUID getWalletTransactionId() {
+		return this.walletTransactionId;
+	}
+
+	/** Not attached to any transaction yet. */
+	public boolean isUnattached() {
+		return this.transactionId == null && this.walletTransactionId == null;
+	}
+
 	public void attachTo(UUID transactionId) {
 		this.transactionId = transactionId;
 	}
 
 	public void detach() {
 		this.transactionId = null;
+	}
+
+	public void attachToWallet(UUID walletTransactionId) {
+		this.walletTransactionId = walletTransactionId;
 	}
 
 }

@@ -32,7 +32,9 @@ public record TransactionRequest(
 		UUID categoryId,
 		@Schema(description = "0 to 10 active tags (archived ones already on it can stay)", nullable = true)
 		@Size(max = TransactionService.MAX_TAGS) List<UUID> tagIds,
-		@Schema(description = "1 to 5 proof files: your new uploads, or files already on it") List<UUID> fileIds) {
+		@Schema(description = "1 to 5 proof files: your new uploads, or files already on it") List<UUID> fileIds,
+		@Schema(description = "Create only: true = save even if a transaction with the same type, amount, currency "
+				+ "and date exists", nullable = true) Boolean confirmDuplicate) {
 
 	public TransactionRequest {
 		description = (description != null) ? description.strip() : null;

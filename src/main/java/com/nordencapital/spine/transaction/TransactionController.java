@@ -25,6 +25,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.nordencapital.spine.auth.AuthUser;
 import com.nordencapital.spine.common.ApiError;
+import com.nordencapital.spine.common.ListFilter;
+import com.nordencapital.spine.common.ListPage;
 
 @Tag(name = "Transactions", description = "Company transactions, shared: every logged-in user sees and edits all. "
 		+ "Delete moves to the trash (its creator, OWNER, ADMIN); restore is OWNER/ADMIN. Every write needs the "
@@ -38,16 +40,29 @@ public class TransactionController {
 		this.service = service;
 	}
 
-	@Operation(summary = "One month of transactions, with totals per currency",
-			description = "Newest first. Trashed ones are not shown.")
+	@Operation(summary = "Search transactions (filters, paging, totals)",
+			description = "Not trashed. Newest first. Totals count ALL matches, not only this page. Without "
+					+ "month/from/to: this month in my time zone preference. See docs/api-module5.md (A).")
 	@ApiResponse(responseCode = "200", description = "OK")
-	@ApiResponse(responseCode = "400", description = "validation_error (bad month)",
+	@ApiResponse(responseCode = "400", description = "validation_error (bad filter)",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
 	@GetMapping("/api/transactions")
-	public TransactionList month(@AuthenticationPrincipal AuthUser actor,
-			@Parameter(description = "YYYY-MM. Default: this month in my time zone preference (UTC if automatic).")
-			@RequestParam(required = false) String month) {
-		return this.service.month(actor, month);
+	public ListPage<TransactionResponse> list(@AuthenticationPrincipal AuthUser actor,
+			@Parameter(description = "First date YYYY-MM-DD (included)") @RequestParam(required = false) String from,
+			@Parameter(description = "Last date YYYY-MM-DD (included)") @RequestParam(required = false) String to,
+			@Parameter(description = "YYYY-MM, used when from/to are not given") @RequestParam(
+					required = false) String month,
+			@Parameter(description = "Text in the description or a comment") @RequestParam(required = false) String q,
+			@Parameter(description = "Category ids (a parent includes its children)") @RequestParam(
+					required = false) List<String> categoryIds,
+			@Parameter(description = "Tag ids (any of them)") @RequestParam(required = false) List<String> tagIds,
+			@RequestParam(required = false) String type, @RequestParam(required = false) String currency,
+			@Parameter(description = "User id") @RequestParam(required = false) String createdBy,
+			@RequestParam(required = false) String minAmount, @RequestParam(required = false) String maxAmount,
+			@Parameter(description = "0-based, default 0") @RequestParam(required = false) String page,
+			@Parameter(description = "Default 50, max 100") @RequestParam(required = false) String size) {
+		return this.service.list(actor, new ListFilter.Params(from, to, month, q, categoryIds, tagIds, type, currency,
+				createdBy, minAmount, maxAmount, page, size));
 	}
 
 	@Operation(summary = "One transaction")
@@ -63,6 +78,7 @@ public class TransactionController {
 	@ApiResponse(responseCode = "201", description = "Created")
 	@ApiResponse(responseCode = "400", description = "validation_error, proof_required or future_date",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
+	@ApiResponse(responseCode = "409", description = "possible_duplicate (send again with confirmDuplicate: true)")
 	@PostMapping("/api/transactions")
 	public ResponseEntity<TransactionResponse> create(@AuthenticationPrincipal AuthUser actor,
 			@Valid @RequestBody TransactionRequest body) {

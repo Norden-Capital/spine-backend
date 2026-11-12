@@ -41,7 +41,7 @@ public class TagController {
 
 	@Operation(summary = "Search active tags", description = "Name contains q (case does not count), by name, max 50.")
 	@GetMapping("/api/tags")
-	public List<TagResponse> search(@AuthenticationPrincipal AuthUser actor,
+	public List<TagPick> search(@AuthenticationPrincipal AuthUser actor,
 			@Parameter(description = "Text to look for. Empty = all active tags.") @RequestParam(
 					required = false) String q) {
 		return this.service.search(actor, q);

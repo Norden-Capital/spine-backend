@@ -31,6 +31,12 @@ public class ApiExceptionHandler {
 		return ResponseEntity.badRequest().body(new ApiError("validation_error", message));
 	}
 
+	@ExceptionHandler(DuplicateException.class)
+	ResponseEntity<DuplicateException.Body> handleDuplicate(DuplicateException ex) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+			.body(new DuplicateException.Body("possible_duplicate", ex.getMessage(), ex.getMatches()));
+	}
+
 	/** Upload bigger than spring.servlet.multipart limits. */
 	@ExceptionHandler(MaxUploadSizeExceededException.class)
 	ResponseEntity<ApiError> handleTooLarge(MaxUploadSizeExceededException ex) {

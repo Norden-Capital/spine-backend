@@ -19,18 +19,20 @@ class CategoriesAndTagsIntegrationTests extends IntegrationTestBase {
 	// ---- categories ----
 
 	@Test
-	void seededCategoriesInDisplayOrder() {
+	void seededCategoriesUnusedAreByName() {
 		activeUser("emp@example.com", Role.EMPLOYEE);
 		MvcTestResult result = loggedIn("emp@example.com").get("/api/categories");
 		assertThat(result).hasStatus(HttpStatus.OK);
 		assertThat(result).bodyJson()
 			.extractingPath("$[*].name")
 			.asArray()
-			.containsExactly("Travel", "Food", "Transport", "Software", "Office", "Bills", "Other");
+			.containsExactly("Bills", "Food", "Office", "Other", "Software", "Transport", "Travel");
 		assertThat(result).bodyJson()
 			.extractingPath("$[*].icon")
 			.asArray()
-			.containsExactly("plane", "utensils", "car", "laptop", "briefcase", "receipt", "ellipsis");
+			.containsExactly("receipt", "utensils", "briefcase", "ellipsis", "laptop", "car", "plane");
+		assertThat(result).bodyJson().extractingPath("$[0].usageCount").isEqualTo(0);
+		assertThat(result).bodyJson().extractingPath("$[0].parentId").isNull();
 		assertThat(result).bodyJson().extractingPath("$[0].archived").isEqualTo(false);
 		assertThat(result).bodyJson().extractingPath("$[0].id").isNotNull();
 	}
@@ -73,7 +75,7 @@ class CategoriesAndTagsIntegrationTests extends IntegrationTestBase {
 	}
 
 	@Test
-	void adminCreatesCategoryBeforeOther() {
+	void adminCreatesCategory() {
 		activeUser("admin@example.com", Role.ADMIN);
 		Client admin = loggedIn("admin@example.com");
 
@@ -86,7 +88,7 @@ class CategoriesAndTagsIntegrationTests extends IntegrationTestBase {
 		assertThat(admin.get("/api/categories")).bodyJson()
 			.extractingPath("$[*].name")
 			.asArray()
-			.containsExactly("Travel", "Food", "Transport", "Software", "Office", "Bills", "Gym", "Other");
+			.containsExactly("Bills", "Food", "Gym", "Office", "Other", "Software", "Transport", "Travel");
 	}
 
 	@Test

@@ -2,6 +2,10 @@ package com.nordencapital.spine.category;
 
 import java.util.List;
 
+import org.springframework.http.HttpStatus;
+
+import com.nordencapital.spine.common.ApiException;
+
 /**
  * Icons a category may use (Lucide icon names), in the order the frontend shows them.
  * "ellipsis" is for the seeded "Other" category. This list is the single source of truth:
@@ -18,6 +22,16 @@ public final class CategoryIcons {
 			"dog", "calendar", "ellipsis");
 
 	private CategoryIcons() {
+	}
+
+	/**
+	 * @throws ApiException 400 {@code validation_error} if the icon is not in the list
+	 */
+	public static void check(String icon) {
+		if (!ALLOWED.contains(icon)) {
+			throw new ApiException(HttpStatus.BAD_REQUEST, "validation_error",
+					"icon: must be one of the icons from GET /api/categories/icons");
+		}
 	}
 
 }

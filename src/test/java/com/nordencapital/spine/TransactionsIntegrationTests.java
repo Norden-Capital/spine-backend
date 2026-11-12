@@ -423,8 +423,8 @@ class TransactionsIntegrationTests extends IntegrationTestBase {
 
 	private String createdId(Client client, String description) {
 		String file = upload(client, "proof.pdf");
-		assertThat(client.post("/api/transactions",
-				body("EXPENSE", "1", "USD", TODAY, description, "Food", List.of(), List.of(file))))
+		assertThat(client.post("/api/transactions", confirmed(
+				body("EXPENSE", "1", "USD", TODAY, description, "Food", List.of(), List.of(file)))))
 			.hasStatus(HttpStatus.CREATED);
 		return this.jdbc.queryForObject("SELECT transaction_id::text FROM files WHERE id = ?::uuid", String.class, file);
 	}
@@ -466,6 +466,11 @@ class TransactionsIntegrationTests extends IntegrationTestBase {
 		return "{\"type\":\"" + type + "\",\"amount\":\"" + amount + "\",\"currency\":\"" + currency + "\",\"date\":\""
 				+ date + "\",\"description\":\"" + description + "\",\"categoryId\":\"" + categoryId(category)
 				+ "\",\"tagIds\":" + ids(tagIds) + ",\"fileIds\":" + ids(fileIds) + "}";
+	}
+
+	/** The same body with "confirmDuplicate": true. */
+	static String confirmed(String body) {
+		return body.substring(0, body.length() - 1) + ",\"confirmDuplicate\":true}";
 	}
 
 	private static String ids(List<String> ids) {

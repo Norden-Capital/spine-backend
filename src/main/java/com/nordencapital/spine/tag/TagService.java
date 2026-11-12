@@ -1,17 +1,23 @@
 package com.nordencapital.spine.tag;
 
+import java.sql.Date;
 import java.time.Clock;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.nordencapital.spine.auth.AuthUser;
+import com.nordencapital.spine.category.CategoryService;
 import com.nordencapital.spine.common.ApiException;
+import com.nordencapital.spine.common.Like;
 import com.nordencapital.spine.common.Names;
 import com.nordencapital.spine.user.Actors;
 import com.nordencapital.spine.user.User;
@@ -29,29 +35,37 @@ public class TagService {
 
 	private final Actors actors;
 
+	private final JdbcTemplate jdbc;
+
 	private final Clock clock;
 
-	public TagService(TagRepository tags, Actors actors, Clock clock) {
+	public TagService(TagRepository tags, Actors actors, JdbcTemplate jdbc, Clock clock) {
 		this.tags = tags;
 		this.actors = actors;
+		this.jdbc = jdbc;
 		this.clock = clock;
 	}
 
 	/**
-	 * Active tags whose name contains {@code text} (case does not count), by name, at
+	 * Picker: active tags whose name contains {@code text} (case does not count), most
+	 * used in the last 90 days first (company transactions, all users), then by name; at
 	 * most {@value #MAX_RESULTS}.
 	 */
 	@Transactional(readOnly = true)
-	public List<TagResponse> search(AuthUser principal, String text) {
+	public List<TagPick> search(AuthUser principal, String text) {
 		this.actors.active(principal);
 		String cleaned = (text != null) ? text.strip() : "";
 		if (cleaned.length() > Names.MAX_LENGTH) {
 			return List.of();
 		}
-		return this.tags.findTop50ByArchivedFalseAndNameContainingIgnoreCaseOrderByNameAsc(cleaned)
-			.stream()
-			.map(TagResponse::from)
-			.toList();
+		LocalDate since = LocalDate.now(this.clock.withZone(ZoneOffset.UTC)).minusDays(CategoryService.USAGE_DAYS);
+		return this.jdbc.query("SELECT g.id, g.name, count(t.id) AS n FROM tags g "
+				+ "LEFT JOIN transaction_tags tt ON tt.tag_id = g.id "
+				+ "LEFT JOIN transactions t ON t.id = tt.transaction_id AND t.deleted_at IS NULL AND t.date >= ? "
+				+ "WHERE NOT g.archived AND lower(g.name) LIKE ? ESCAPE '\\' "
+				+ "GROUP BY g.id, g.name ORDER BY count(t.id) DESC, lower(g.name), g.id LIMIT ?",
+				(rs, row) -> new TagPick(rs.getObject("id", UUID.class), rs.getString("name"), false, rs.getLong("n")),
+				Date.valueOf(since), Like.contains(cleaned), MAX_RESULTS);
 	}
 
 	/**

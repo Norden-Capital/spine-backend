@@ -75,6 +75,17 @@ public abstract class IntegrationTestBase {
 
 	@BeforeEach
 	void cleanDatabase() throws IOException {
+		this.jdbc.update("DELETE FROM notifications");
+		this.jdbc.update("DELETE FROM wallet_goal_contributions");
+		this.jdbc.update("DELETE FROM wallet_goals");
+		this.jdbc.update("DELETE FROM wallet_budgets");
+		this.jdbc.update("DELETE FROM files");
+		this.jdbc.update("DELETE FROM wallet_transactions");
+		this.jdbc.update("DELETE FROM wallet_recurring");
+		this.jdbc.update("DELETE FROM wallet_tags");
+		this.jdbc.update("DELETE FROM wallet_categories");
+		this.jdbc.update("DELETE FROM wallet_settings");
+		this.jdbc.update("DELETE FROM transaction_comments");
 		this.jdbc.update("DELETE FROM transaction_history");
 		this.jdbc.update("DELETE FROM transaction_tags");
 		this.jdbc.update("DELETE FROM files");

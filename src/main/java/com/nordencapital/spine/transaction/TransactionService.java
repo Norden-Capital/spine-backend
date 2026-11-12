@@ -16,16 +16,23 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.nordencapital.spine.auth.AuthUser;
 import com.nordencapital.spine.category.Category;
 import com.nordencapital.spine.category.CategoryRepository;
+import com.nordencapital.spine.category.CategoryService;
 import com.nordencapital.spine.common.ApiException;
+import com.nordencapital.spine.common.DuplicateException;
+import com.nordencapital.spine.common.ListFilter;
+import com.nordencapital.spine.common.ListPage;
+import com.nordencapital.spine.common.TransactionSearch;
 import com.nordencapital.spine.file.StoredFile;
 import com.nordencapital.spine.file.StoredFileRepository;
 import com.nordencapital.spine.me.UserZones;
@@ -58,6 +65,9 @@ public class TransactionService {
 	 */
 	private static final ZoneId LATEST_ZONE = ZoneOffset.ofHours(14);
 
+	private static final TransactionSearch SEARCH = new TransactionSearch("transactions", "transaction_tags",
+			"categories", "transaction_comments");
+
 	private final TransactionRepository transactions;
 
 	private final CategoryRepository categories;
@@ -74,11 +84,15 @@ public class TransactionService {
 
 	private final UserZones zones;
 
+	private final CategoryService categoryService;
+
+	private final JdbcTemplate jdbc;
+
 	private final Clock clock;
 
 	public TransactionService(TransactionRepository transactions, CategoryRepository categories, TagRepository tags,
 			StoredFileRepository files, TransactionViews views, TransactionHistory history, Actors actors,
-			UserZones zones, Clock clock) {
+			UserZones zones, CategoryService categoryService, JdbcTemplate jdbc, Clock clock) {
 		this.transactions = transactions;
 		this.categories = categories;
 		this.tags = tags;
@@ -87,23 +101,28 @@ public class TransactionService {
 		this.history = history;
 		this.actors = actors;
 		this.zones = zones;
+		this.categoryService = categoryService;
+		this.jdbc = jdbc;
 		this.clock = clock;
 	}
 
 	/**
-	 * One month, not trashed, newest first, with totals per currency.
-	 * @param month "YYYY-MM"; null = this month in my time zone preference (UTC if
-	 * automatic)
-	 * @throws ApiException 400 {@code validation_error} (bad month)
+	 * Filtered list, not trashed, newest first, one page, with totals of all matches.
+	 * Without month/from/to: this month in my time zone preference (UTC if automatic).
+	 * @throws ApiException 400 {@code validation_error} (bad filter)
 	 */
 	@Transactional(readOnly = true)
-	public TransactionList month(AuthUser principal, String month) {
+	public ListPage<TransactionResponse> list(AuthUser principal, ListFilter.Params params) {
 		User actor = this.actors.active(principal);
-		YearMonth yearMonth = (month != null) ? parseMonth(month)
-				: YearMonth.now(this.clock.withZone(this.zones.saved(actor.getId()).orElse(ZoneOffset.UTC)));
-		List<Transaction> found = this.transactions.findAllByDeletedAtIsNullAndDateBetweenOrderByDateDescCreatedAtDesc(
-				yearMonth.atDay(1), yearMonth.atEndOfMonth());
-		return new TransactionList(this.views.many(found, actor), totals(found));
+		YearMonth thisMonth = YearMonth.now(this.clock.withZone(this.zones.saved(actor.getId()).orElse(ZoneOffset.UTC)));
+		ListFilter filter = ListFilter.parse(params, thisMonth);
+		TransactionSearch.Result result = SEARCH.run(this.jdbc, filter, "t.deleted_at IS NULL", List.of(), "created_by");
+		Map<UUID, Transaction> found = this.transactions.findAllById(result.ids())
+			.stream()
+			.collect(Collectors.toMap(Transaction::getId, Function.identity()));
+		List<Transaction> ordered = result.ids().stream().map(found::get).filter(Objects::nonNull).toList();
+		return new ListPage<>(this.views.many(ordered, actor), result.totals(), filter.page(), filter.size(),
+				result.count(), result.hasNext(filter));
 	}
 
 	/**
@@ -118,11 +137,19 @@ public class TransactionService {
 	/**
 	 * @throws ApiException 400 {@code validation_error}, {@code proof_required},
 	 * {@code future_date}
+	 * @throws DuplicateException (409) same type, amount, currency and date exists, and
+	 * confirmDuplicate is not true
 	 */
 	@Transactional
 	public TransactionResponse create(AuthUser principal, TransactionRequest request) {
 		User actor = this.actors.active(principal);
 		Checked checked = check(request, actor, null);
+		if (!Boolean.TRUE.equals(request.confirmDuplicate())) {
+			List<DuplicateException.Match> matches = duplicates(checked.values());
+			if (!matches.isEmpty()) {
+				throw new DuplicateException(matches);
+			}
+		}
 		Instant now = this.clock.instant();
 		Transaction transaction = this.transactions.saveAndFlush(Transaction.create(checked.values(), actor.getId(), now));
 		checked.files().forEach((file) -> file.attachTo(transaction.getId()));
@@ -241,8 +268,8 @@ public class TransactionService {
 		Category category = this.categories.findById(request.categoryId())
 			.orElseThrow(() -> invalid("categoryId: unknown category"));
 		boolean keepsOldCategory = existing != null && existing.getCategoryId().equals(category.getId());
-		if (category.isArchived() && !keepsOldCategory) {
-			throw invalid("categoryId: this category is archived");
+		if (!keepsOldCategory && !this.categoryService.isPickable(category)) {
+			throw invalid("categoryId: this category (or its parent) is archived");
 		}
 
 		Set<UUID> oldTags = (existing != null) ? existing.getTagIds() : Set.of();
@@ -257,7 +284,7 @@ public class TransactionService {
 		List<StoredFile> foundFiles = this.files.findAllById(fileIds);
 		UUID existingId = (existing != null) ? existing.getId() : null;
 		boolean allUsable = foundFiles.size() == fileIds.size() && foundFiles.stream()
-			.allMatch((file) -> (file.getTransactionId() == null && file.getOwnerId().equals(actor.getId()))
+			.allMatch((file) -> (file.isUnattached() && file.getOwnerId().equals(actor.getId()))
 					|| (existingId != null && existingId.equals(file.getTransactionId())));
 		if (!allUsable) {
 			throw invalid("fileIds: use files you just uploaded, or files already on this transaction");
@@ -284,34 +311,23 @@ public class TransactionService {
 		}
 	}
 
-	private static YearMonth parseMonth(String month) {
-		try {
-			return YearMonth.parse(month);
-		}
-		catch (DateTimeParseException ex) {
-			throw invalid("month: must be like 2026-03");
-		}
-	}
-
 	// ---- totals and history ----
 
-	private static Map<String, TransactionList.Totals> totals(List<Transaction> found) {
-		Map<String, TransactionList.Totals> totals = new LinkedHashMap<>();
-		for (String currency : List.of("USD", "MAD")) {
-			BigDecimal in = sum(found, currency, "INCOME");
-			BigDecimal out = sum(found, currency, "EXPENSE");
-			totals.put(currency, new TransactionList.Totals(TransactionViews.money(in), TransactionViews.money(out),
-					TransactionViews.money(in.subtract(out))));
-		}
-		return totals;
-	}
-
-	private static BigDecimal sum(List<Transaction> found, String currency, String type) {
-		return found.stream()
-			.filter((tx) -> tx.getCurrency().equals(currency) && tx.getType().equals(type))
-			.map(Transaction::getAmount)
-			.reduce(BigDecimal.ZERO, BigDecimal::add)
-			.setScale(2);
+	/** Non-trashed transactions with the same type, amount, currency and date (newest 5). */
+	private List<DuplicateException.Match> duplicates(Transaction.Values values) {
+		List<Object[]> rows = this.jdbc.query(
+				"SELECT id, description, created_by, created_at FROM transactions WHERE deleted_at IS NULL AND type = ? "
+						+ "AND amount = ? AND currency = ? AND date = ? ORDER BY created_at DESC LIMIT 5",
+				(rs, row) -> new Object[] { rs.getObject("id", UUID.class), rs.getString("description"),
+						rs.getObject("created_by", UUID.class), rs.getTimestamp("created_at").toInstant() },
+				values.type(), values.amount(), values.currency(), java.sql.Date.valueOf(values.date()));
+		Map<UUID, User> users = this.views.usersById(rows.stream().map((row) -> (UUID) row[2]).toList());
+		return rows.stream().map((row) -> {
+			User user = users.get((UUID) row[2]);
+			return new DuplicateException.Match((UUID) row[0], (String) row[1],
+					new DuplicateException.UserRef((UUID) row[2], (user != null) ? user.displayName() : null),
+					(Instant) row[3]);
+		}).toList();
 	}
 
 	private Snapshot snapshot(Transaction tx, List<StoredFile> currentFiles) {

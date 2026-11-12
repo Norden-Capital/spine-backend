@@ -31,6 +31,7 @@
 		<springdoc.version>3.2.0</springdoc.version>
 		<bouncycastle.version>1.86</bouncycastle.version>
 		<webauthn.version>2.10.1</webauthn.version>
+		<anthropic.version>3.3.0</anthropic.version>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -76,6 +77,12 @@
 			<groupId>com.yubico</groupId>
 			<artifactId>webauthn-server-core</artifactId>
 			<version>${webauthn.version}</version>
+		</dependency>
+		<dependency>
+			<!-- AI comment suggestion (optional: only used when ANTHROPIC_API_KEY is set) -->
+			<groupId>com.anthropic</groupId>
+			<artifactId>anthropic-java</artifactId>
+			<version>${anthropic.version}</version>
 		</dependency>
 		<dependency>
 			<groupId>org.springdoc</groupId>

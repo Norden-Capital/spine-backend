@@ -27,6 +27,8 @@ import org.springframework.web.bind.annotation.RestController;
 import com.nordencapital.spine.auth.AuthUser;
 import com.nordencapital.spine.common.ApiError;
 import com.nordencapital.spine.common.Names;
+import com.nordencapital.spine.common.ParentPatch;
+import tools.jackson.databind.JsonNode;
 
 @Tag(name = "Categories", description = "Everyone reads active categories. /api/admin/categories is for OWNER and "
 		+ "ADMIN. Categories are never deleted, only archived.")
@@ -39,9 +41,11 @@ public class CategoryController {
 		this.service = service;
 	}
 
-	@Operation(summary = "Active categories", description = "Sorted for display (Other stays last).")
+	@Operation(summary = "Categories for a picker",
+			description = "Active ones (and not under an archived parent), most used in the last 90 days first, then by "
+					+ "name. Flat list: group children by parentId.")
 	@GetMapping("/api/categories")
-	public List<CategoryResponse> active(@AuthenticationPrincipal AuthUser actor) {
+	public List<CategoryPick> active(@AuthenticationPrincipal AuthUser actor) {
 		return this.service.active(actor);
 	}
 
@@ -51,13 +55,15 @@ public class CategoryController {
 		return CategoryIcons.ALLOWED;
 	}
 
-	@Operation(summary = "All categories, archived too")
+	@Operation(summary = "All categories, archived too", description = "By name.")
 	@GetMapping("/api/admin/categories")
 	public List<CategoryResponse> all(@AuthenticationPrincipal AuthUser actor) {
 		return this.service.all(actor);
 	}
 
-	@Operation(summary = "Create a category", description = "Name: 1 to 40 characters, unique (case does not count).")
+	@Operation(summary = "Create a category",
+			description = "Name: 1 to 40 characters, unique (case does not count). parentId: a top-level category, or "
+					+ "null (one level only).")
 	@ApiResponse(responseCode = "201", description = "Created")
 	@ApiResponse(responseCode = "400", description = "validation_error",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
@@ -66,10 +72,12 @@ public class CategoryController {
 	@PostMapping("/api/admin/categories")
 	public ResponseEntity<CategoryResponse> create(@AuthenticationPrincipal AuthUser actor,
 			@Valid @RequestBody CreateRequest body) {
-		return ResponseEntity.status(HttpStatus.CREATED).body(this.service.create(actor, body.name(), body.icon()));
+		return ResponseEntity.status(HttpStatus.CREATED).body(this.service.create(actor, body.name(), body.icon(), body.parentId()));
 	}
 
-	@Operation(summary = "Rename and/or change the icon", description = "Leave a field out (or null) to keep it.")
+	@Operation(summary = "Change the name, icon and/or parent",
+			description = "name/icon: leave out (or null) to keep. parentId: leave out to keep, null = top level, an "
+					+ "id = move under that category.")
 	@ApiResponse(responseCode = "200", description = "Saved")
 	@ApiResponse(responseCode = "400", description = "validation_error",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
@@ -80,7 +88,7 @@ public class CategoryController {
 	@PatchMapping("/api/admin/categories/{id}")
 	public CategoryResponse update(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody UpdateRequest body) {
-		return this.service.update(actor, id, body.name(), body.icon());
+		return this.service.update(actor, id, body.name(), body.icon(), ParentPatch.of(body.parentId()));
 	}
 
 	@Operation(summary = "Archive a category", description = "Hidden from GET /api/categories. Old data keeps it.")
@@ -105,7 +113,8 @@ public class CategoryController {
 	public record CreateRequest(
 			@NotBlank @Size(max = Names.MAX_LENGTH) @Pattern(regexp = Names.NO_CONTROL_CHARS,
 					message = "must not contain control characters") String name,
-			@Schema(description = "One of GET /api/categories/icons") @NotNull String icon) {
+			@Schema(description = "One of GET /api/categories/icons") @NotNull String icon,
+			@Schema(nullable = true, description = "A top-level category, or null") UUID parentId) {
 
 		public CreateRequest {
 			name = Names.clean(name);
@@ -117,7 +126,9 @@ public class CategoryController {
 	public record UpdateRequest(
 			@Schema(nullable = true) @Size(min = 1, max = Names.MAX_LENGTH) @Pattern(regexp = Names.NO_CONTROL_CHARS,
 					message = "must not contain control characters") String name,
-			@Schema(nullable = true, description = "One of GET /api/categories/icons") String icon) {
+			@Schema(nullable = true, description = "One of GET /api/categories/icons") String icon,
+			@Schema(nullable = true, type = "string", format = "uuid",
+					description = "Leave out = keep; null = top level; an id = move under it") JsonNode parentId) {
 
 		public UpdateRequest {
 			name = Names.clean(name);
