@@ -38,7 +38,7 @@ import static org.springframework.security.test.web.servlet.request.SecurityMock
  * Security rules and CSRF on the web layer, with the services mocked. Runs without Docker.
  */
 @WebMvcTest(controllers = { AuthController.class, AdminUserController.class, PingController.class })
-@Import(SecurityConfig.class)
+@Import({ SecurityConfig.class, SessionLogin.class })
 class SecurityRulesWebTests {
 
 	@Autowired

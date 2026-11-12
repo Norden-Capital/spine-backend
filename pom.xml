@@ -30,6 +30,7 @@
 		<java.version>21</java.version>
 		<springdoc.version>3.2.0</springdoc.version>
 		<bouncycastle.version>1.86</bouncycastle.version>
+		<webauthn.version>2.10.1</webauthn.version>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -69,6 +70,12 @@
 			<groupId>org.bouncycastle</groupId>
 			<artifactId>bcprov-jdk18on</artifactId>
 			<version>${bouncycastle.version}</version>
+		</dependency>
+		<dependency>
+			<!-- Passkeys (WebAuthn): checks registration and login responses -->
+			<groupId>com.yubico</groupId>
+			<artifactId>webauthn-server-core</artifactId>
+			<version>${webauthn.version}</version>
 		</dependency>
 		<dependency>
 			<groupId>org.springdoc</groupId>

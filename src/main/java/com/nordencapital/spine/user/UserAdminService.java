@@ -19,6 +19,7 @@ import com.nordencapital.spine.common.Emails;
 import com.nordencapital.spine.mail.AuthMails;
 import com.nordencapital.spine.me.SignInDay;
 import com.nordencapital.spine.me.SignInHistory;
+import com.nordencapital.spine.passkey.PasskeyRepository;
 
 /**
  * User management for the OWNER and ADMINs. Who can see and manage whom:
@@ -46,16 +47,19 @@ public class UserAdminService {
 
 	private final Actors actors;
 
+	private final PasskeyRepository passkeys;
+
 	private final Clock clock;
 
 	public UserAdminService(UserRepository users, AuthTokenService tokens, AuthMails mails, UserSessions sessions,
-			SignInHistory signInHistory, Actors actors, Clock clock) {
+			SignInHistory signInHistory, Actors actors, PasskeyRepository passkeys, Clock clock) {
 		this.users = users;
 		this.tokens = tokens;
 		this.mails = mails;
 		this.sessions = sessions;
 		this.signInHistory = signInHistory;
 		this.actors = actors;
+		this.passkeys = passkeys;
 		this.clock = clock;
 	}
 
@@ -76,10 +80,11 @@ public class UserAdminService {
 	 * @throws ApiException 404 {@code user_not_found}
 	 */
 	@Transactional(readOnly = true)
-	public UserResponse get(AuthUser principal, UUID id) {
+	public UserDetailResponse get(AuthUser principal, UUID id) {
 		User actor = actor(principal);
 		User user = visible(actor, id);
-		return UserResponse.from(user, UserAccess.canManage(actor, user));
+		return UserDetailResponse.from(user, UserAccess.canManage(actor, user),
+				this.passkeys.countByUserId(user.getId()));
 	}
 
 	/**

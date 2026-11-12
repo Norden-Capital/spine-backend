@@ -50,7 +50,7 @@ public class SecurityConfig {
 			.requestMatchers(HttpMethod.GET, "/api/ping", "/actuator/health", "/actuator/health/**").permitAll()
 			.requestMatchers(HttpMethod.GET, "/api/auth/csrf", "/api/auth/token/*").permitAll()
 			.requestMatchers(HttpMethod.POST, "/api/auth/login", "/api/auth/logout", "/api/auth/forgot-password",
-					"/api/auth/set-password")
+					"/api/auth/set-password", "/api/auth/passkey/options", "/api/auth/passkey/login")
 			.permitAll()
 			// Swagger: only switched on by the local profile; 404 everywhere else.
 			.requestMatchers(HttpMethod.GET, "/v3/api-docs", "/v3/api-docs/**", "/swagger-ui.html", "/swagger-ui/**")

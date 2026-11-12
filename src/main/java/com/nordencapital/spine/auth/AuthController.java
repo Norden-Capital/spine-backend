@@ -1,6 +1,5 @@
 package com.nordencapital.spine.auth;
 
-import java.util.List;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -17,13 +16,9 @@ import jakarta.validation.constraints.Size;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
-import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.context.SecurityContextHolderStrategy;
-import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.security.web.csrf.CsrfTokenRepository;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -47,17 +42,16 @@ public class AuthController {
 
 	private final AuthService authService;
 
-	private final SecurityContextRepository securityContextRepository;
+	private final SessionLogin sessionLogin;
 
 	private final CsrfTokenRepository csrfTokenRepository;
 
 	private final SecurityContextHolderStrategy securityContextHolderStrategy = SecurityContextHolder
 		.getContextHolderStrategy();
 
-	public AuthController(AuthService authService, SecurityContextRepository securityContextRepository,
-			CsrfTokenRepository csrfTokenRepository) {
+	public AuthController(AuthService authService, SessionLogin sessionLogin, CsrfTokenRepository csrfTokenRepository) {
 		this.authService = authService;
-		this.securityContextRepository = securityContextRepository;
+		this.sessionLogin = sessionLogin;
 		this.csrfTokenRepository = csrfTokenRepository;
 	}
 
@@ -80,20 +74,7 @@ public class AuthController {
 	public MeResponse login(@Valid @RequestBody LoginRequest body, HttpServletRequest request,
 			HttpServletResponse response) {
 		User loggedIn = this.authService.login(body.email(), body.password(), request.getRemoteAddr());
-		AuthUser user = new AuthUser(loggedIn.getId(), loggedIn.getEmail(), loggedIn.getRole());
-
-		// New session id on login (stops session fixation).
-		if (request.getSession(false) != null) {
-			request.changeSessionId();
-		}
-		SecurityContext context = this.securityContextHolderStrategy.createEmptyContext();
-		context.setAuthentication(UsernamePasswordAuthenticationToken.authenticated(user, null,
-				List.of(new SimpleGrantedAuthority("ROLE_" + user.role().name()))));
-		this.securityContextHolderStrategy.setContext(context);
-		this.securityContextRepository.saveContext(context, request, response);
-
-		// New CSRF token after login.
-		this.csrfTokenRepository.saveToken(this.csrfTokenRepository.generateToken(request), request, response);
+		this.sessionLogin.start(loggedIn, request, response);
 		return MeResponse.from(loggedIn);
 	}
 
@@ -171,7 +152,7 @@ public class AuthController {
 	 */
 	public record MeResponse(java.util.UUID id, String email, Role role, String firstName, String lastName) {
 
-		static MeResponse from(User user) {
+		public static MeResponse from(User user) {
 			return new MeResponse(user.getId(), user.getEmail(), user.getRole(), user.getFirstName(),
 					user.getLastName());
 		}

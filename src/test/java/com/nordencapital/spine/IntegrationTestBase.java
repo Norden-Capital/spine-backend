@@ -179,6 +179,15 @@ public abstract class IntegrationTestBase {
 			return sendWithCsrf(this.mvc.put().uri(uri).contentType(MediaType.APPLICATION_JSON).content(json));
 		}
 
+		public MvcTestResult delete(String uri) {
+			return sendWithCsrf(this.mvc.delete().uri(uri));
+		}
+
+		/** Same as {@link #post} but without the X-XSRF-TOKEN header. */
+		public MvcTestResult postWithoutCsrf(String uri, String json) {
+			return send(this.mvc.post().uri(uri).contentType(MediaType.APPLICATION_JSON).content(json));
+		}
+
 		/** Same as {@link #put} but without the X-XSRF-TOKEN header. */
 		public MvcTestResult putWithoutCsrf(String uri, String json) {
 			return send(this.mvc.put().uri(uri).contentType(MediaType.APPLICATION_JSON).content(json));

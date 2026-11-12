@@ -53,12 +53,12 @@ public class AdminUserController {
 		return this.service.list(actor);
 	}
 
-	@Operation(summary = "One user")
+	@Operation(summary = "One user", description = "Also says how many passkeys the user has.")
 	@ApiResponse(responseCode = "200", description = "OK")
 	@ApiResponse(responseCode = "404", description = "user_not_found",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
 	@GetMapping("/{id}")
-	public UserResponse get(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id) {
+	public UserDetailResponse get(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id) {
 		return this.service.get(actor, id);
 	}
 

@@ -14,7 +14,8 @@ import com.nordencapital.spine.config.AppProperties;
  * {@code login-lock-time} after the first failure (429);</li>
  * <li>forgot password: at most {@code forgot-password-max-requests} per
  * {@code forgot-password-window}; extra requests still get 202 but send nothing;</li>
- * <li>change password: same rules as login, for wrong current passwords (429).</li>
+ * <li>change password: same rules as login, for wrong current passwords (429);</li>
+ * <li>passkey login: same rules as login, keyed by client IP (no email is typed).</li>
  * </ul>
  */
 @Component
@@ -26,11 +27,14 @@ public class AuthLimiters {
 
 	private final AttemptLimiter changePassword;
 
+	private final AttemptLimiter passkeyLogin;
+
 	public AuthLimiters(AppProperties properties, Clock clock) {
 		AppProperties.Auth auth = properties.auth();
 		this.login = new AttemptLimiter(auth.loginMaxFailures(), auth.loginLockTime(), clock);
 		this.forgotPassword = new AttemptLimiter(auth.forgotPasswordMaxRequests(), auth.forgotPasswordWindow(), clock);
 		this.changePassword = new AttemptLimiter(auth.loginMaxFailures(), auth.loginLockTime(), clock);
+		this.passkeyLogin = new AttemptLimiter(auth.loginMaxFailures(), auth.loginLockTime(), clock);
 	}
 
 	public AttemptLimiter login() {
@@ -45,11 +49,16 @@ public class AuthLimiters {
 		return this.changePassword;
 	}
 
+	public AttemptLimiter passkeyLogin() {
+		return this.passkeyLogin;
+	}
+
 	/** Forgets all counters (used by tests). */
 	public void clearAll() {
 		this.login.clear();
 		this.forgotPassword.clear();
 		this.changePassword.clear();
+		this.passkeyLogin.clear();
 	}
 
 }
