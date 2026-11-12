@@ -31,7 +31,7 @@ public class LogoController {
 			description = "Use a logoUrl. Only for domains on company transactions/categories or on your own wallet "
 					+ "transactions/categories. The first request may take a few seconds (the server fetches it). "
 					+ "Cache-Control no-cache + ETag: the browser keeps the image but asks every time (304 if same).")
-	@ApiResponse(responseCode = "200", description = "PNG, JPEG, WebP or ICO image")
+	@ApiResponse(responseCode = "200", description = "PNG, JPEG, WebP, ICO or a plain SVG image")
 	@ApiResponse(responseCode = "404", description = "logo_not_found (no logo: show the category icon)")
 	@GetMapping("/api/logos/{domain:.+}")
 	public ResponseEntity<byte[]> logo(@AuthenticationPrincipal AuthUser actor, @PathVariable String domain,
@@ -50,7 +50,9 @@ public class LogoController {
 			.eTag(etag)
 			.header("Vary", "Cookie")
 			.header("X-Content-Type-Options", "nosniff")
-			.header("Content-Security-Policy", "default-src 'none'; sandbox")
+			.header("Content-Security-Policy",
+					"image/svg+xml".equals(logo.contentType()) ? "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+							: "default-src 'none'; sandbox")
 			.header("Content-Disposition", "inline")
 			.body(logo.data());
 	}

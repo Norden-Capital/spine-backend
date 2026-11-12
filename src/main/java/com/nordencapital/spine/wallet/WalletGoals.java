@@ -60,8 +60,8 @@ public class WalletGoals {
 					UUID goalId = rs.getObject("goal_id", UUID.class);
 					BigDecimal amount = rs.getBigDecimal("amount");
 					contributions.computeIfAbsent(goalId, (k) -> new ArrayList<>())
-						.add(new Contribution(rs.getObject("id", UUID.class), Totals.money(amount),
-								rs.getDate("date").toLocalDate(), rs.getString("note")));
+						.add(new Contribution(rs.getObject("id", UUID.class), (amount.signum() < 0) ? TAKE_OUT : ADD,
+								Totals.money(amount.abs()), rs.getDate("date").toLocalDate(), rs.getString("note")));
 					saved.merge(goalId, amount, BigDecimal::add);
 				}, userId);
 		return goals.stream().map((g) -> {
@@ -107,8 +107,50 @@ public class WalletGoals {
 	/** @return the whole goal, updated. @throws ApiException 404, 400 */
 	@Transactional
 	public Goal contribute(UUID userId, UUID goalId, ContributionRequest request) {
+		return move(userId, goalId, request, false);
+	}
+
+	/**
+	 * Takes money back out of a goal: it goes back to the wallet balance.
+	 * @throws ApiException 404 {@code goal_not_found}, 400 {@code validation_error}, 409
+	 * {@code not_enough_saved} (more than the goal holds)
+	 */
+	@Transactional
+	public Goal takeOut(UUID userId, UUID goalId, ContributionRequest request) {
+		return move(userId, goalId, request, true);
+	}
+
+	/** All money now in my goals (it is not in the wallet balance). */
+	@Transactional(readOnly = true)
+	public BigDecimal savedTotal(UUID userId) {
+		BigDecimal total = this.jdbc.queryForObject("SELECT coalesce(sum(c.amount), 0) FROM wallet_goal_contributions c "
+				+ "JOIN wallet_goals g ON g.id = c.goal_id WHERE g.user_id = ?", BigDecimal.class, userId);
+		return (total != null) ? total : BigDecimal.ZERO;
+	}
+
+	private BigDecimal saved(UUID goalId) {
+		BigDecimal total = this.jdbc.queryForObject(
+				"SELECT coalesce(sum(amount), 0) FROM wallet_goal_contributions WHERE goal_id = ?", BigDecimal.class,
+				goalId);
+		return (total != null) ? total : BigDecimal.ZERO;
+	}
+
+	private static ApiException notEnoughSaved(BigDecimal saved) {
+		return new ApiException(HttpStatus.CONFLICT, "not_enough_saved",
+				"This goal holds only $" + Totals.money(saved));
+	}
+
+	private Goal move(UUID userId, UUID goalId, ContributionRequest request, boolean takeOut) {
 		mine(userId, goalId);
+		this.jdbc.queryForList("SELECT id FROM wallet_goals WHERE id = ? FOR UPDATE", UUID.class, goalId);
 		BigDecimal amount = Money.parse("amount", request.amount());
+		if (takeOut) {
+			BigDecimal saved = saved(goalId);
+			if (amount.compareTo(saved) > 0) {
+				throw notEnoughSaved(saved);
+			}
+			amount = amount.negate();
+		}
 		Date date = date("date", request.date());
 		if (date == null) {
 			throw invalid("date: must not be empty");
@@ -124,6 +166,14 @@ public class WalletGoals {
 	@Transactional
 	public Goal removeContribution(UUID userId, UUID goalId, UUID contributionId) {
 		mine(userId, goalId);
+		this.jdbc.queryForList("SELECT id FROM wallet_goals WHERE id = ? FOR UPDATE", UUID.class, goalId);
+		List<BigDecimal> amount = this.jdbc.queryForList(
+				"SELECT amount FROM wallet_goal_contributions WHERE id = ? AND goal_id = ?", BigDecimal.class,
+				contributionId, goalId);
+		// Removing an "add" must not leave the goal below 0 (money already taken out).
+		if (!amount.isEmpty() && saved(goalId).subtract(amount.get(0)).signum() < 0) {
+			throw notEnoughSaved(saved(goalId));
+		}
 		int deleted = this.jdbc.update("DELETE FROM wallet_goal_contributions WHERE id = ? AND goal_id = ?",
 				contributionId, goalId);
 		if (deleted == 0) {
@@ -168,8 +218,17 @@ public class WalletGoals {
 			int percent, List<Contribution> contributions) {
 	}
 
-	public record Contribution(UUID id, String amount, LocalDate date, String note) {
+	/**
+	 * One movement of a goal.
+	 * @param type ADD (money put in, out of the wallet balance) or TAKE_OUT (back to the balance)
+	 * @param amount always positive
+	 */
+	public record Contribution(UUID id, String type, String amount, LocalDate date, String note) {
 	}
+
+	static final String ADD = "ADD";
+
+	static final String TAKE_OUT = "TAKE_OUT";
 
 	/** The name is trimmed before validation. */
 	public record GoalRequest(

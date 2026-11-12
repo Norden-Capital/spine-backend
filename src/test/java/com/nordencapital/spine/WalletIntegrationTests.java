@@ -295,7 +295,7 @@ class WalletIntegrationTests extends IntegrationTestBase {
 	// ---- goals ----
 
 	@Test
-	void goalsAndContributionsDoNotChangeBalance() {
+	void goalsAndContributions() {
 		activeUser("ada@example.com", Role.MEMBER);
 		Client a = wallet("ada@example.com");
 		MvcTestResult goal = a.post("/api/wallet/goals",
@@ -318,7 +318,8 @@ class WalletIntegrationTests extends IntegrationTestBase {
 			.bodyJson()
 			.extractingPath("$.saved")
 			.isEqualTo("300.00");
-		assertThat(a.get("/api/wallet/dashboard")).bodyJson().extractingPath("$.balance").isEqualTo("0.00");
+		// Goal money left the wallet: no income here, so the balance is below 0.
+		assertThat(a.get("/api/wallet/dashboard")).bodyJson().extractingPath("$.balance").isEqualTo("-300.00");
 		assertError(a.post("/api/wallet/goals/" + id + "/contributions", "{\"amount\":\"0\",\"date\":\"2026-11-01\"}"),
 				HttpStatus.BAD_REQUEST, "validation_error");
 		assertThat(a.delete("/api/wallet/goals/" + id)).hasStatus(HttpStatus.NO_CONTENT);

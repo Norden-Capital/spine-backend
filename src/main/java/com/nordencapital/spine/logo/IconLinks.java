@@ -10,7 +10,7 @@ import java.util.regex.Pattern;
 
 /**
  * Finds icon links in a home page: {@code <link rel="apple-touch-icon">} and
- * {@code <link rel="icon">}, biggest declared size first. SVG icons are skipped.
+ * {@code <link rel="icon">}, biggest declared size first (SVG ones are checked when downloaded).
  */
 final class IconLinks {
 
@@ -60,8 +60,7 @@ final class IconLinks {
 			if (!apple && !rels.contains("icon")) {
 				continue;
 			}
-			if ((type != null && type.contains("svg")) || href.toLowerCase(Locale.ROOT).split("[?#]")[0].endsWith(".svg")
-					|| href.startsWith("data:")) {
+			if (href.startsWith("data:") || rels.contains("mask-icon")) {
 				continue;
 			}
 			URI uri;
@@ -77,6 +76,63 @@ final class IconLinks {
 			}
 			int size = biggest(sizes);
 			found.add(new Candidate(uri, (size > 0) ? size : (apple ? APPLE_DEFAULT : 0)));
+		}
+		found.sort(Comparator.comparingInt(Candidate::declaredSize).reversed());
+		return found;
+	}
+
+	private static final Pattern MANIFEST_LINK = Pattern.compile("<link\\b[^>]*\\brel\\s*=\\s*[\"']?manifest[^>]*>",
+			Pattern.CASE_INSENSITIVE);
+
+	private static final Pattern HREF = Pattern.compile("\\bhref\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s\"'>]+))",
+			Pattern.CASE_INSENSITIVE);
+
+	private static final Pattern MANIFEST_ICON = Pattern.compile("\\{[^{}]*\"src\"\\s*:\\s*\"([^\"]+)\"[^{}]*\\}");
+
+	private static final Pattern MANIFEST_SIZES = Pattern.compile("\"sizes\"\\s*:\\s*\"([^\"]*)\"");
+
+	/** The web app manifest of the page, if it has one. */
+	static URI manifest(String html, URI base) {
+		Matcher link = MANIFEST_LINK.matcher(html);
+		if (!link.find()) {
+			return null;
+		}
+		Matcher href = HREF.matcher(link.group());
+		if (!href.find()) {
+			return null;
+		}
+		String value = (href.group(1) != null) ? href.group(1) : (href.group(2) != null) ? href.group(2) : href.group(3);
+		try {
+			URI uri = base.resolve(value.strip().replace("&amp;", "&").replace(" ", "%20"));
+			String scheme = uri.getScheme();
+			return (scheme != null && (scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) ? uri : null;
+		}
+		catch (IllegalArgumentException ex) {
+			return null;
+		}
+	}
+
+	/** Icons listed in a manifest JSON, biggest declared size first. */
+	static List<Candidate> manifestIcons(String json, URI manifestUri) {
+		List<Candidate> found = new ArrayList<>();
+		Matcher icon = MANIFEST_ICON.matcher(json);
+		while (icon.find()) {
+			String src = icon.group(1).replace("\\/", "/");
+			if (src.toLowerCase(Locale.ROOT).split("[?#]")[0].endsWith(".svg") || src.startsWith("data:")) {
+				continue;
+			}
+			Matcher sizes = MANIFEST_SIZES.matcher(icon.group());
+			int size = sizes.find() ? biggest(sizes.group(1)) : 0;
+			try {
+				URI uri = manifestUri.resolve(src.replace(" ", "%20"));
+				String scheme = uri.getScheme();
+				if (scheme != null && (scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
+					found.add(new Candidate(uri, size));
+				}
+			}
+			catch (IllegalArgumentException ex) {
+				// skip a bad src
+			}
 		}
 		found.sort(Comparator.comparingInt(Candidate::declaredSize).reversed());
 		return found;

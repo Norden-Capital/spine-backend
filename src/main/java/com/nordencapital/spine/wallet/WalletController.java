@@ -120,7 +120,10 @@ public class WalletController {
 	public Dashboard dashboard(@AuthenticationPrincipal AuthUser actor, HttpServletRequest request) {
 		User user = me(actor, request);
 		YearMonth month = this.budgets.thisMonth(user.getId());
-		return new Dashboard(this.transactions.balance(user.getId()),
+		java.math.BigDecimal net = new java.math.BigDecimal(this.transactions.balance(user.getId()));
+		java.math.BigDecimal saved = this.goals.savedTotal(user.getId());
+		return new Dashboard(com.nordencapital.spine.common.Totals.money(net.subtract(saved)),
+				com.nordencapital.spine.common.Totals.money(saved),
 				this.transactions.totals(user.getId(), month.atDay(1), month.atEndOfMonth()),
 				this.budgets.list(user.getId()), this.goals.list(user.getId()), this.transactions.recent(user.getId(), 5));
 	}
@@ -221,7 +224,8 @@ public class WalletController {
 		return this.transactions.update(me(actor, request), id, body);
 	}
 
-	@Operation(summary = "Delete a wallet transaction", description = "Hard delete, with its files.")
+	@Operation(summary = "Delete a wallet transaction", description = "Hard delete, with its files. If a "
+			+ "recurring item made it, that date becomes a skipped date of the item (it is not made again).")
 	@DeleteMapping("/api/wallet/transactions/{id}")
 	public ResponseEntity<Void> deleteTransaction(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			HttpServletRequest request) {
@@ -283,7 +287,8 @@ public class WalletController {
 		return ResponseEntity.noContent().build();
 	}
 
-	@Operation(summary = "Add money to a goal", description = "Returns the whole goal. Does not change the balance.")
+	@Operation(summary = "Add money to a goal", description = "Returns the whole goal. The money leaves the wallet "
+			+ "balance (it is a transfer: not counted as spending this month).")
 	@PostMapping("/api/wallet/goals/{id}/contributions")
 	public ResponseEntity<WalletGoals.Goal> contribute(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody WalletGoals.ContributionRequest body, HttpServletRequest request) {
@@ -291,6 +296,16 @@ public class WalletController {
 			.body(this.goals.contribute(me(actor, request).getId(), id, body));
 	}
 
+	@Operation(summary = "Take money out of a goal", description = "Body like Add money. The money goes back to the "
+			+ "wallet balance. 409 not_enough_saved when the goal holds less.")
+	@PostMapping("/api/wallet/goals/{id}/take-out")
+	public ResponseEntity<WalletGoals.Goal> takeOut(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
+			@Valid @RequestBody WalletGoals.ContributionRequest body, HttpServletRequest request) {
+		return ResponseEntity.status(HttpStatus.CREATED).body(this.goals.takeOut(me(actor, request).getId(), id, body));
+	}
+
+	@Operation(summary = "Remove one goal movement", description = "Undoes an add or a take out (the balance follows). "
+			+ "409 not_enough_saved if removing an add would leave the goal below 0.")
 	@DeleteMapping("/api/wallet/goals/{id}/contributions/{contributionId}")
 	public WalletGoals.Goal removeContribution(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@PathVariable UUID contributionId, HttpServletRequest request) {
@@ -409,10 +424,12 @@ public class WalletController {
 	}
 
 	/**
-	 * @param balance all-time INCOME - EXPENSE
-	 * @param thisMonth this month in/out/net
+	 * @param balance available now: all-time INCOME - EXPENSE - money in goals (goal money left the
+	 * wallet; taking it out of a goal, or deleting the goal, brings it back)
+	 * @param savedInGoals all money now in my goals
+	 * @param thisMonth this month in/out/net of transactions only (goal moves are transfers, not spending)
 	 */
-	public record Dashboard(String balance, Totals thisMonth,
+	public record Dashboard(String balance, String savedInGoals, Totals thisMonth,
 			List<WalletBudgets.Budget> budgets, List<WalletGoals.Goal> goals, List<WalletTransactions.WalletTx> recent) {
 	}
 

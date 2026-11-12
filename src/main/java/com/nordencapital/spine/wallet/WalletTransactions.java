@@ -168,6 +168,12 @@ public class WalletTransactions {
 	@Transactional
 	public void delete(User user, UUID id) {
 		get(user, id);
+		// Made by a recurring item: that date counts as skipped, so the item never makes it
+		// again (the job, a change of the item or Resume would see "nothing for that date").
+		this.jdbc.update("INSERT INTO wallet_recurring_skips (recurring_id, skip_date, created_at) "
+				+ "SELECT recurring_id, recurring_date, ? FROM wallet_transactions "
+				+ "WHERE id = ? AND user_id = ? AND recurring_id IS NOT NULL AND recurring_date IS NOT NULL "
+				+ "ON CONFLICT DO NOTHING", Timestamp.from(this.clock.instant()), id, user.getId());
 		this.fileService.deleteNow(this.files.findAllByWalletTransactionIdInOrderByCreatedAtAsc(List.of(id)));
 		this.jdbc.update("DELETE FROM wallet_transactions WHERE id = ? AND user_id = ?", id, user.getId());
 	}

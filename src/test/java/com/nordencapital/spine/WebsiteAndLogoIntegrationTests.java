@@ -125,6 +125,16 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 		assertThat(missing).bodyJson().extractingPath("$.error").isEqualTo("logo_not_found");
 		assertThat(a.get("/api/logos/nologo.example.com")).hasStatus(HttpStatus.NOT_FOUND);
 		assertThat(this.fetcher.count("nologo.example.com")).isEqualTo(1);
+		// A failure is tried again after a short time (1 hour), so a fixed site gets its logo.
+		assertThat(this.jdbc.queryForObject("SELECT retry_after < now() + interval '61 minutes' FROM logos "
+				+ "WHERE domain = 'nologo.example.com'", Boolean.class)).isTrue();
+		this.fetcher.logos.put("nologo.example.com", new LogoFetcher.Logo("image/png", PNG));
+		this.jdbc.update("UPDATE logos SET retry_after = now() - interval '1 second' WHERE domain = 'nologo.example.com'");
+		assertThat(a.get("/api/logos/nologo.example.com")).hasStatus(HttpStatus.OK);
+		assertThat(this.fetcher.count("nologo.example.com")).isEqualTo(2);
+		this.fetcher.logos.remove("nologo.example.com");
+		this.jdbc.update("UPDATE logos SET status = 'NONE', content_type = NULL, data = NULL, retry_after = now() + "
+				+ "interval '1 hour' WHERE domain = 'nologo.example.com'");
 
 		// Now known: the frontend gets null and shows the category icon.
 		assertThat(a.get("/api/transactions")).bodyJson().extractingPath("$.items[0].logoUrl").isNull();

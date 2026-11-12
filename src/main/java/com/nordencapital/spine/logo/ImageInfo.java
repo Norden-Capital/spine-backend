@@ -1,8 +1,8 @@
 package com.nordencapital.spine.logo;
 
 /**
- * Type and size of a logo image, read from its first bytes (magic bytes). Only PNG,
- * JPEG, WebP and ICO are accepted. SVG is never accepted (it can hold scripts).
+ * Type and size of a logo image, read from its first bytes (magic bytes). PNG, JPEG,
+ * WebP, ICO, and SVG only when it is a plain drawing (no scripts, handlers or outside links).
  * @param width 0 if unknown
  * @param height 0 if unknown
  */
@@ -27,7 +27,32 @@ record ImageInfo(String contentType, int width, int height) {
 		if (d[0] == 0 && d[1] == 0 && d[2] == 1 && d[3] == 0) {
 			return ico(d);
 		}
-		return null;
+		return svg(d);
+	}
+
+	/** A vector image counts as a big square one. */
+	static final int SVG_SIZE = 256;
+
+	private static final java.util.regex.Pattern SVG_UNSAFE = java.util.regex.Pattern.compile(
+			"<script|<foreignobject|<iframe|<embed|<object|<!entity|<!doctype|javascript:|data:text"
+					+ "|\\son[a-z]+\\s*=|(xlink:)?href\\s*=\\s*[\"']\\s*(https?:|//)|url\\(\\s*['\"]?\\s*(https?:|//)"
+					+ "|@import");
+
+	/**
+	 * SVG only when it is a plain drawing: no scripts, no event handlers, no outside links or
+	 * embedded documents. Anything doubtful is refused (the next icon is tried).
+	 */
+	private static ImageInfo svg(byte[] d) {
+		String text = new String(d, java.nio.charset.StandardCharsets.UTF_8).strip();
+		if (text.startsWith("\uFEFF")) {
+			text = text.substring(1);
+		}
+		String lower = text.toLowerCase(java.util.Locale.ROOT);
+		boolean looksSvg = lower.startsWith("<svg") || (lower.startsWith("<?xml") && lower.contains("<svg"));
+		if (!looksSvg || !lower.contains("</svg>") || SVG_UNSAFE.matcher(lower).find()) {
+			return null;
+		}
+		return new ImageInfo("image/svg+xml", SVG_SIZE, SVG_SIZE);
 	}
 
 	/** The smaller side (what matters for a square logo). */

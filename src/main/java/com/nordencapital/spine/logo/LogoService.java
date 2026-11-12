@@ -45,8 +45,8 @@ public class LogoService implements DisposableBean {
 	/** A found logo is fetched again after this (lazily, on use). */
 	static final Duration REFRESH_OK = Duration.ofDays(30);
 
-	/** A domain without a usable logo is tried again after this. */
-	static final Duration RETRY_NONE = Duration.ofDays(3);
+	/** A domain without a usable logo is tried again after this (short: sites change, fetches can fail). */
+	static final Duration RETRY_NONE = Duration.ofHours(1);
 
 	/** How long a first request waits for a fetch in progress. */
 	private static final Duration WAIT = Duration.ofSeconds(25);
@@ -208,6 +208,12 @@ public class LogoService implements DisposableBean {
 		catch (RuntimeException ex) {
 			logger.debug("Logo fetch failed for {}", domain, ex);
 			logo = Optional.empty();
+		}
+		if (logo.isPresent()) {
+			logger.info("Logo {}: ok, {} {} bytes", domain, logo.get().contentType(), logo.get().data().length);
+		}
+		else {
+			logger.info("Logo {}: none ({})", domain, this.fetcher.lastFailure());
 		}
 		if (logo.isPresent()) {
 			save(domain, "OK", logo.get().contentType(), logo.get().data(), now, now.plus(REFRESH_OK));

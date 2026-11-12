@@ -98,7 +98,7 @@ class LogoSafetyTests {
 	}
 
 	@Test
-	void findsIconLinksBiggestFirstAndSkipsSvg() {
+	void findsIconLinksBiggestFirst() {
 		String html = """
 				<html><head>
 				<link rel="icon" href="/favicon-32.png" sizes="32x32">
@@ -112,7 +112,45 @@ class LogoSafetyTests {
 		List<IconLinks.Candidate> found = IconLinks.parse(html, URI.create("https://example.com/home/"));
 		assertThat(found).extracting(IconLinks.Candidate::uri)
 			.containsExactly(URI.create("https://cdn.example.com/icon-512.png?v=1&x=2"),
-					URI.create("https://example.com/apple.png"), URI.create("https://example.com/favicon-32.png"));
+					URI.create("https://example.com/apple.png"), URI.create("https://example.com/favicon-32.png"),
+					URI.create("https://example.com/icon.svg"));
+	}
+
+	@Test
+	void readsManifestIcons() {
+		String html = "<head><link rel=\"manifest\" href=\"/site.webmanifest\"></head>";
+		URI manifest = IconLinks.manifest(html, URI.create("https://example.com/"));
+		assertThat(manifest).isEqualTo(URI.create("https://example.com/site.webmanifest"));
+		String json = """
+				{"name":"X","icons":[{"src":"\\/img\\/icon-192.png","sizes":"192x192","type":"image/png"},
+				{"src":"icon-512.png","sizes":"512x512"},{"src":"logo.svg","sizes":"any"},
+				{"src":"javascript:alert(1)","sizes":"64x64"}]}""";
+		assertThat(IconLinks.manifestIcons(json, URI.create("https://cdn.example.com/app/site.webmanifest")))
+			.extracting(IconLinks.Candidate::uri)
+			.containsExactly(URI.create("https://cdn.example.com/app/icon-512.png"),
+					URI.create("https://cdn.example.com/img/icon-192.png"));
+		assertThat(IconLinks.manifest("<head></head>", URI.create("https://example.com/"))).isNull();
+	}
+
+	@Test
+	void acceptsOnlyPlainSvgDrawings() {
+		String plain = "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">"
+				+ "<path style=\"fill:#000\" d=\"M0 0h24v24H0z\"/></svg>";
+		assertThat(ImageInfo.detect(plain.getBytes(StandardCharsets.UTF_8)))
+			.isEqualTo(new ImageInfo("image/svg+xml", ImageInfo.SVG_SIZE, ImageInfo.SVG_SIZE));
+		for (String bad : new String[] { "<svg><script>alert(1)</script></svg>", "<svg onload=\"alert(1)\"></svg>",
+				"<svg><a href=\"javascript:alert(1)\">x</a></svg>", "<svg><image href=\"https://evil.example/x.png\"/></svg>",
+				"<svg><foreignObject><p>x</p></foreignObject></svg>", "<svg><style>@import url(//evil.example/a.css);</style></svg>",
+				"<!DOCTYPE svg [<!ENTITY x \"y\">]><svg></svg>", "<svg>not closed" }) {
+			assertThat(ImageInfo.detect(bad.getBytes(StandardCharsets.UTF_8))).as(bad).isNull();
+		}
+	}
+
+	@Test
+	void saysWhyNothingWasFound() {
+		HttpLogoFetcher fetcher = new HttpLogoFetcher((host) -> new InetAddress[] { InetAddress.getByName("10.0.0.7") });
+		assertThat(fetcher.fetch("inside.example.com")).isEmpty();
+		assertThat(fetcher.lastFailure()).contains("inside.example.com/ refused: private address");
 	}
 
 }

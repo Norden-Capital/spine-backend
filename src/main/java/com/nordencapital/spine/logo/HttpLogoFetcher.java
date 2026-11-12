@@ -40,7 +40,8 @@ import com.nordencapital.spine.common.Websites;
  * SSRF guards: http/https only, ports 80/443 only, no IP literals, DNS answers with any
  * non-public address are refused (on every hop: {@link SafeDns}), at most 3 redirects,
  * 5 s connect/read timeouts and a 20 s budget per domain, at most 1 MB per response,
- * only PNG/JPEG/WebP/ICO images (checked from the bytes), no proxy, no cookies.
+ * only PNG/JPEG/WebP/ICO images and plain SVG drawings (checked from the bytes), no
+ * proxy, no cookies. Compressed (gzip) answers are unpacked by the client.
  */
 @Component
 class HttpLogoFetcher implements LogoFetcher, DisposableBean {
@@ -53,7 +54,14 @@ class HttpLogoFetcher implements LogoFetcher, DisposableBean {
 
 	private static final Duration BUDGET = Duration.ofSeconds(20);
 
-	private static final int MAX_CANDIDATES = 6;
+	private static final int MAX_CANDIDATES = 8;
+
+	/** A common browser identity: many sites refuse unknown clients. */
+	static final String USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+			+ "Chrome/131.0.0.0 Safari/537.36";
+
+	/** What went wrong in the current fetch (one list per thread). */
+	private final ThreadLocal<java.util.List<String>> failures = ThreadLocal.withInitial(java.util.ArrayList::new);
 
 	/** A square logo this big is good enough: stop looking. */
 	private static final int GOOD_SIZE = 128;
@@ -90,7 +98,9 @@ class HttpLogoFetcher implements LogoFetcher, DisposableBean {
 			.disableCookieManagement()
 			.disableAuthCaching()
 			.disableAutomaticRetries()
-			.setUserAgent("Mozilla/5.0 (compatible; SpineLogoFetcher/1.0)")
+			.setUserAgent(USER_AGENT)
+			.setDefaultHeaders(java.util.List.of(
+					new org.apache.hc.core5.http.message.BasicHeader("Accept-Language", "en-US,en;q=0.9")))
 			.build();
 	}
 
@@ -99,6 +109,7 @@ class HttpLogoFetcher implements LogoFetcher, DisposableBean {
 		if (!Websites.isDomain(domain)) {
 			return Optional.empty();
 		}
+		this.failures.get().clear();
 		Instant deadline = Instant.now().plus(BUDGET);
 		URI home = URI.create("https://" + domain + "/");
 		Optional<Body> page = get(home, false, deadline);
@@ -107,9 +118,21 @@ class HttpLogoFetcher implements LogoFetcher, DisposableBean {
 		}
 		Set<URI> candidates = new LinkedHashSet<>();
 		URI base = page.map(Body::uri).orElse(home);
-		page.ifPresent((body) -> IconLinks.parse(new String(body.data(), StandardCharsets.UTF_8), body.uri())
-			.forEach((candidate) -> candidates.add(candidate.uri())));
+		java.util.List<IconLinks.Candidate> declared = new java.util.ArrayList<>();
+		page.ifPresent((body) -> {
+			String html = new String(body.data(), StandardCharsets.UTF_8);
+			declared.addAll(IconLinks.parse(html, body.uri()));
+			URI manifest = IconLinks.manifest(html, body.uri());
+			if (manifest != null) {
+				get(manifest, false, deadline).ifPresent((json) -> declared
+					.addAll(IconLinks.manifestIcons(new String(json.data(), StandardCharsets.UTF_8), json.uri())));
+			}
+		});
+		declared.sort(java.util.Comparator.comparingInt(IconLinks.Candidate::declaredSize).reversed());
+		declared.forEach((candidate) -> candidates.add(candidate.uri()));
+		candidates.add(base.resolve("/apple-touch-icon.png"));
 		candidates.add(base.resolve("/favicon.ico"));
+		candidates.add(home.resolve("/apple-touch-icon.png"));
 		candidates.add(home.resolve("/favicon.ico"));
 
 		Logo best = null;
@@ -118,6 +141,9 @@ class HttpLogoFetcher implements LogoFetcher, DisposableBean {
 			Optional<Body> image = get(uri, true, deadline);
 			ImageInfo info = image.map((body) -> ImageInfo.detect(body.data())).orElse(null);
 			if (info == null) {
+				if (image.isPresent()) {
+					fail(uri, "not an image");
+				}
 				continue;
 			}
 			if (bestInfo == null || better(info, bestInfo)) {
@@ -129,6 +155,16 @@ class HttpLogoFetcher implements LogoFetcher, DisposableBean {
 			}
 		}
 		return Optional.ofNullable(best);
+	}
+
+	@Override
+	public String lastFailure() {
+		java.util.List<String> list = this.failures.get();
+		return list.isEmpty() ? "no usable image" : String.join("; ", list.subList(0, Math.min(list.size(), 6)));
+	}
+
+	private void fail(URI uri, String why) {
+		this.failures.get().add(uri.getHost() + uri.getPath() + " " + why);
 	}
 
 	/** Square beats not square, then bigger beats smaller. */
@@ -155,12 +191,18 @@ class HttpLogoFetcher implements LogoFetcher, DisposableBean {
 	private Optional<Body> get(URI start, boolean image, Instant deadline) {
 		URI uri = start;
 		for (int hop = 0; hop <= MAX_REDIRECTS; hop++) {
-			if (!allowed(uri) || Instant.now().isAfter(deadline)) {
+			if (!allowed(uri)) {
+				fail(uri, "not allowed (scheme, port or IP address)");
+				return Optional.empty();
+			}
+			if (Instant.now().isAfter(deadline)) {
+				fail(uri, "time budget over");
 				return Optional.empty();
 			}
 			HttpGet request = new HttpGet(uri);
 			request.setHeader("Accept",
-					image ? "image/png,image/webp,image/jpeg,image/x-icon,image/*;q=0.5" : "text/html,*/*;q=0.5");
+					image ? "image/avif,image/webp,image/png,image/svg+xml,image/*,*/*;q=0.8"
+							: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
 			ClassicHttpResponse response = null;
 			try {
 				response = this.http.executeOpen(null, request, null);
@@ -168,18 +210,25 @@ class HttpLogoFetcher implements LogoFetcher, DisposableBean {
 				if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
 					Header location = response.getFirstHeader("Location");
 					if (location == null) {
+						fail(uri, "redirect without Location");
 						return Optional.empty();
 					}
 					uri = uri.resolve(new URI(location.getValue().strip().replace(" ", "%20")));
 					continue;
 				}
 				if (code != 200 || response.getEntity() == null) {
+					fail(uri, "HTTP " + code);
 					return Optional.empty();
 				}
 				byte[] data = read(response.getEntity(), image, deadline);
+				if (data == null) {
+					fail(uri, "too big or too slow");
+				}
 				return (data != null) ? Optional.of(new Body(uri, data)) : Optional.empty();
 			}
 			catch (IOException | URISyntaxException | IllegalArgumentException ex) {
+				fail(uri, (ex instanceof SafeDns.RefusedAddressException) ? "refused: private address"
+						: ex.getClass().getSimpleName());
 				logger.debug("Logo fetch failed for {}: {}", uri, ex.toString());
 				return Optional.empty();
 			}
@@ -196,6 +245,7 @@ class HttpLogoFetcher implements LogoFetcher, DisposableBean {
 				}
 			}
 		}
+		fail(start, "too many redirects");
 		return Optional.empty();
 	}
 
