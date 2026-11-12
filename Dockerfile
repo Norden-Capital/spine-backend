@@ -20,7 +20,13 @@ FROM eclipse-temurin:21-jre
 WORKDIR /application
 
 RUN groupadd --system spring \
- && useradd --system --gid spring --no-create-home --shell /usr/sbin/nologin spring
+ && useradd --system --gid spring --no-create-home --shell /usr/sbin/nologin spring \
+ && mkdir -p /app/data/files \
+ && chown -R spring:spring /app/data
+
+# Uploaded proof files live here (a named volume in prod). A new empty volume gets
+# this folder and its owner from the image, so the non-root user can write to it.
+VOLUME /app/data
 
 # Copy layers from least to most frequently changed for better caching.
 COPY --from=build /workspace/extracted/dependencies/ ./

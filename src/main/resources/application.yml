@@ -11,9 +11,18 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+    properties:
+      hibernate:
+        # Loads lazy collections (like transaction tags) in batches, not one query per row.
+        default_batch_fetch_size: 100
   flyway:
     enabled: true
     locations: classpath:db/migration
+  servlet:
+    multipart:
+      # Proof files: max 10 MB each (checked again in code). A bit more for the whole request.
+      max-file-size: 10MB
+      max-request-size: 11MB
   session:
     # Sessions live in Postgres. Flyway creates the tables (V3), so never let Spring do it.
     jdbc:
@@ -21,6 +30,10 @@ spring:
 
 server:
   port: ${SERVER_PORT:8080}
+  tomcat:
+    # Read (and drop) uploads up to this size, so a too big file gets a clean 413 answer
+    # instead of a broken connection.
+    max-swallow-size: 50MB
   servlet:
     session:
       # Log out after 8 hours without any request.
@@ -61,6 +74,9 @@ app:
     # Empty = emails are only printed to the console (local dev).
     resend-api-key: ${RESEND_API_KEY:}
     require-resend: false
+  files:
+    # Uploaded proof files. Local runs keep them in ./data/files (ignored by git).
+    dir: ${APP_FILES_DIR:./data/files}
   bootstrap:
     # On startup, if there is no user at all, this email is invited as the first ADMIN.
     admin-email: ${APP_BOOTSTRAP_ADMIN_EMAIL:admin@nordencapital.ca}

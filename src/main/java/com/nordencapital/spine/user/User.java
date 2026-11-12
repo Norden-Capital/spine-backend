@@ -93,6 +93,14 @@ public class User {
 		return this.lastLoginAt;
 	}
 
+	/** "First Last", or the email if no name is set. */
+	public String displayName() {
+		String name = java.util.stream.Stream.of(this.firstName, this.lastName)
+			.filter((part) -> part != null && !part.isBlank())
+			.collect(java.util.stream.Collectors.joining(" "));
+		return name.isEmpty() ? this.email : name;
+	}
+
 	public String getFirstName() {
 		return this.firstName;
 	}

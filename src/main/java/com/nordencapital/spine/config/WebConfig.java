@@ -6,7 +6,7 @@ import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({ CorsProperties.class, AppProperties.class })
+@EnableConfigurationProperties({ CorsProperties.class, AppProperties.class, FilesProperties.class })
 public class WebConfig implements WebMvcConfigurer {
 
 	private final CorsProperties corsProperties;

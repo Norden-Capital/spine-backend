@@ -25,13 +25,13 @@ public class SignInHistory {
 
 	private final LoginEvents loginEvents;
 
-	private final UserPreferencesRepository preferences;
+	private final UserZones zones;
 
 	private final Clock clock;
 
-	public SignInHistory(LoginEvents loginEvents, UserPreferencesRepository preferences, Clock clock) {
+	public SignInHistory(LoginEvents loginEvents, UserZones zones, Clock clock) {
 		this.loginEvents = loginEvents;
-		this.preferences = preferences;
+		this.zones = zones;
 		this.clock = clock;
 	}
 
@@ -42,11 +42,7 @@ public class SignInHistory {
 	 */
 	@Transactional(readOnly = true)
 	public List<SignInDay> days(UUID subjectId, UUID viewerId, LocalDate from) {
-		ZoneId zone = this.preferences.findById(viewerId)
-			.map(UserPreferences::toPreferences)
-			.map(Preferences::timeZone)
-			.<ZoneId>map(ZoneId::of)
-			.orElse(ZoneOffset.UTC);
+		ZoneId zone = this.zones.saved(viewerId).orElse(ZoneOffset.UTC);
 		LocalDate start = (from != null) ? from : LocalDate.now(this.clock.withZone(zone)).minusMonths(DEFAULT_MONTHS);
 		Map<LocalDate, int[]> days = new TreeMap<>();
 		for (LoginEvents.Attempt attempt : this.loginEvents.since(subjectId, start.atStartOfDay(zone).toInstant())) {

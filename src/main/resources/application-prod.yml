@@ -39,3 +39,6 @@ app:
     require-resend: true
   bootstrap:
     admin-email: ${APP_BOOTSTRAP_ADMIN_EMAIL}
+  files:
+    # Docker named volume "spine-files" is mounted at /app/data (see deploy/compose.prod.yaml).
+    dir: /app/data/files

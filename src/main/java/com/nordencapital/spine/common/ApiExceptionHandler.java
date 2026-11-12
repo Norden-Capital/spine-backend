@@ -7,6 +7,9 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
@@ -26,6 +29,19 @@ public class ApiExceptionHandler {
 			.findFirst()
 			.orElse("Invalid request");
 		return ResponseEntity.badRequest().body(new ApiError("validation_error", message));
+	}
+
+	/** Upload bigger than spring.servlet.multipart limits. */
+	@ExceptionHandler(MaxUploadSizeExceededException.class)
+	ResponseEntity<ApiError> handleTooLarge(MaxUploadSizeExceededException ex) {
+		return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+			.body(new ApiError("file_too_large", "A file can be at most 10 MB"));
+	}
+
+	/** Not a multipart request, or the "file" part is missing. */
+	@ExceptionHandler({ MultipartException.class, MissingServletRequestPartException.class })
+	ResponseEntity<ApiError> handleBadUpload(Exception ex) {
+		return ResponseEntity.badRequest().body(new ApiError("validation_error", "file: a file is required"));
 	}
 
 	@ExceptionHandler({ HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class })

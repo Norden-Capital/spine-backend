@@ -23,6 +23,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
@@ -42,7 +43,7 @@ import com.nordencapital.spine.user.UserStatus;
  * Full app + real Postgres (Testcontainers, needs Docker). Emails are captured instead of
  * sent. Each test starts with empty users, tokens and sessions.
  */
-@SpringBootTest(properties = "app.bootstrap.admin-email=bootstrap@example.com")
+@SpringBootTest(properties = { "app.bootstrap.admin-email=bootstrap@example.com", "app.files.dir=target/test-files" })
 @AutoConfigureMockMvc
 @Import({ TestcontainersConfiguration.class, IntegrationTestBase.MailCapture.class })
 public abstract class IntegrationTestBase {
@@ -74,6 +75,10 @@ public abstract class IntegrationTestBase {
 
 	@BeforeEach
 	void cleanDatabase() throws IOException {
+		this.jdbc.update("DELETE FROM transaction_history");
+		this.jdbc.update("DELETE FROM transaction_tags");
+		this.jdbc.update("DELETE FROM files");
+		this.jdbc.update("DELETE FROM transactions");
 		this.jdbc.update("DELETE FROM tags");
 		this.jdbc.update("DELETE FROM categories");
 		// Back to the 7 starting categories, with the same SQL as the migration.
@@ -183,6 +188,25 @@ public abstract class IntegrationTestBase {
 			return sendWithCsrf(this.mvc.delete().uri(uri));
 		}
 
+		/** Uploads a file to POST /api/files (multipart, field "file"). */
+		public MvcTestResult upload(String name, String contentType, byte[] content) {
+			if (!this.cookies.containsKey("XSRF-TOKEN")) {
+				get("/api/auth/csrf");
+			}
+			var request = this.mvc.post()
+				.uri("/api/files")
+				.multipart()
+				.file(new MockMultipartFile("file", name, contentType, content))
+				.header("X-XSRF-TOKEN", this.cookies.get("XSRF-TOKEN"));
+			if (!this.cookies.isEmpty()) {
+				request.cookie(this.cookies.entrySet()
+					.stream()
+					.map((entry) -> new Cookie(entry.getKey(), entry.getValue()))
+					.toArray(Cookie[]::new));
+			}
+			return keepCookies(request.exchange());
+		}
+
 		/** Same as {@link #post} but without the X-XSRF-TOKEN header. */
 		public MvcTestResult postWithoutCsrf(String uri, String json) {
 			return send(this.mvc.post().uri(uri).contentType(MediaType.APPLICATION_JSON).content(json));
@@ -215,7 +239,10 @@ public abstract class IntegrationTestBase {
 					.map((entry) -> new Cookie(entry.getKey(), entry.getValue()))
 					.toArray(Cookie[]::new));
 			}
-			MvcTestResult result = request.exchange();
+			return keepCookies(request.exchange());
+		}
+
+		private MvcTestResult keepCookies(MvcTestResult result) {
 			for (Cookie cookie : result.getResponse().getCookies()) {
 				if (cookie.getMaxAge() == 0 || cookie.getValue() == null || cookie.getValue().isEmpty()) {
 					this.cookies.remove(cookie.getName());
