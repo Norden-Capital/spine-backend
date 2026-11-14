@@ -44,8 +44,9 @@ class BalanceIntegrationTests extends IntegrationTestBase {
 		assertThat(created).hasStatus(HttpStatus.CREATED);
 		assertThat(created).bodyJson().extractingPath("$.balance.name").isEqualTo("Twilio");
 		assertThat(created).bodyJson().extractingPath("$.balance.website").isEqualTo("twilio.com");
-		assertThat(created).bodyJson().extractingPath("$.balance.logoUrls[0]")
-			.isEqualTo("https://twilio.com/apple-touch-icon.png");
+		// The logo may come from the real site (it can change), so only check where it is from.
+		assertThat(created).bodyJson().extractingPath("$.balance.logoUrls[0]").asString()
+			.matches("https://(www[.])?twilio[.]com/.+");
 		assertThat(created).bodyJson().extractingPath("$.balance.guess").isEqualTo("80.00");
 		assertThat(created).bodyJson().extractingPath("$.balance.percent").isEqualTo(100);
 		assertThat(created).bodyJson().extractingPath("$.balance.perMonth").isEqualTo("194.82");
