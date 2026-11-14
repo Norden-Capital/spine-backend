@@ -6,6 +6,7 @@ import java.time.Duration;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
@@ -26,7 +27,8 @@ class MeIntegrationTests extends IntegrationTestBase {
 	private static final String NEW_PASSWORD = "a-brand-new-password";
 
 	private static final String TORONTO_PREFS = "{\"dateFormat\":\"YYYY-MM-DD\",\"timeZone\":\"America/Toronto\","
-			+ "\"theme\":\"DARK\",\"font\":\"INTER\",\"textSize\":\"LARGE\"}";
+			+ "\"theme\":\"DARK\",\"font\":\"INTER\",\"textSize\":\"LARGE\","
+			+ "\"walletCurrency\":\"MAD\",\"walletUsdRate\":\"10.50\"}";
 
 	@Test
 	void everyEndpointNeedsLogin() {
@@ -251,7 +253,7 @@ class MeIntegrationTests extends IntegrationTestBase {
 		activeUser("other@example.com", Role.MEMBER);
 		Client client = loggedIn("emp@example.com");
 		String defaults = "{\"dateFormat\":\"DD/MM/YYYY\",\"timeZone\":null,\"theme\":\"SYSTEM\","
-				+ "\"font\":\"GEIST\",\"textSize\":\"NORMAL\"}";
+				+ "\"font\":\"GEIST\",\"textSize\":\"NORMAL\",\"walletCurrency\":\"USD\",\"walletUsdRate\":\"10.00\"}";
 
 		assertThat(client.get("/api/me/preferences")).hasStatus(HttpStatus.OK).bodyJson().isStrictlyEqualTo(defaults);
 
@@ -280,6 +282,41 @@ class MeIntegrationTests extends IntegrationTestBase {
 		assertValidationError(client.put("/api/me/preferences", TORONTO_PREFS.replace("\"theme\":\"DARK\",", "")));
 
 		assertThat(client.get("/api/me/preferences")).bodyJson().extractingPath("$.theme").isEqualTo("SYSTEM");
+	}
+
+	@Test
+	void walletCurrencyAndRateAreSavedKeptAndValidated() {
+		activeUser("emp@example.com", Role.MEMBER);
+		Client client = loggedIn("emp@example.com");
+		String base = "{\"dateFormat\":\"DD/MM/YYYY\",\"timeZone\":null,\"theme\":\"SYSTEM\","
+				+ "\"font\":\"GEIST\",\"textSize\":\"NORMAL\"";
+
+		MvcTestResult saved = client.put("/api/me/preferences",
+				base + ",\"walletCurrency\":\"MAD\",\"walletUsdRate\":\"9.8765\"}");
+		assertThat(saved).hasStatus(HttpStatus.OK);
+		assertThat(saved).bodyJson().extractingPath("$.walletCurrency").isEqualTo("MAD");
+		assertThat(saved).bodyJson().extractingPath("$.walletUsdRate").isEqualTo("9.8765");
+		assertThat(client.get("/api/me/preferences")).bodyJson().extractingPath("$.walletUsdRate").isEqualTo("9.8765");
+
+		// An older app that does not send the wallet fields keeps them.
+		assertThat(client.put("/api/me/preferences", base.replace("SYSTEM", "DARK") + "}")).hasStatus(HttpStatus.OK);
+		MvcTestResult kept = client.get("/api/me/preferences");
+		assertThat(kept).bodyJson().extractingPath("$.theme").isEqualTo("DARK");
+		assertThat(kept).bodyJson().extractingPath("$.walletCurrency").isEqualTo("MAD");
+		assertThat(kept).bodyJson().extractingPath("$.walletUsdRate").isEqualTo("9.8765");
+
+		assertThat(client.put("/api/me/preferences", base + ",\"walletUsdRate\":\"12\"}")).bodyJson()
+			.extractingPath("$.walletUsdRate")
+			.isEqualTo("12.00");
+		assertThat(client.put("/api/me/preferences", base + ",\"walletUsdRate\":\"1000\"}")).hasStatus(HttpStatus.OK);
+
+		for (String bad : List.of("0", "0.0000", "-1", "1000.01", "1001", "10.12345", "abc", "", "1e2")) {
+			assertValidationError(client.put("/api/me/preferences", base + ",\"walletUsdRate\":\"" + bad + "\"}"));
+		}
+		assertValidationError(client.put("/api/me/preferences", base + ",\"walletCurrency\":\"EUR\"}"));
+		assertThat(client.get("/api/me/preferences")).bodyJson().extractingPath("$.walletUsdRate").isEqualTo("1000.00");
+		assertThat(this.jdbc.queryForObject("SELECT wallet_currency FROM user_preferences", String.class))
+			.isEqualTo("MAD");
 	}
 
 	private static void assertValidationError(MvcTestResult result) {

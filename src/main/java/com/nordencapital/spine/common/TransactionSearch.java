@@ -43,6 +43,17 @@ public final class TransactionSearch {
 	 */
 	public Result run(JdbcTemplate jdbc, ListFilter filter, String baseWhere, List<Object> baseArgs,
 			String createdByColumn) {
+		return run(jdbc, filter, baseWhere, baseArgs, createdByColumn, null);
+	}
+
+	/**
+	 * Like {@link #run(JdbcTemplate, ListFilter, String, List, String)}, for a table with a
+	 * {@code currency} column (the private wallet): the totals are summed per currency and
+	 * each sum goes through {@code converter} (rounded once, at the end).
+	 * @param converter null = one currency, no {@code currency} column (company)
+	 */
+	public Result run(JdbcTemplate jdbc, ListFilter filter, String baseWhere, List<Object> baseArgs,
+			String createdByColumn, Converter converter) {
 		List<Object> args = new ArrayList<>(baseArgs);
 		StringBuilder where = new StringBuilder(baseWhere);
 		if (filter.from() != null) {
@@ -92,10 +103,19 @@ public final class TransactionSearch {
 
 		long count = jdbc.queryForObject("SELECT count(*)" + from, Long.class, args.toArray());
 		Map<String, BigDecimal> sums = new HashMap<>();
-		jdbc.query("SELECT t.type, sum(t.amount) AS total" + from + " GROUP BY t.type",
-				(rs) -> {
-					sums.put(rs.getString("type"), rs.getBigDecimal("total"));
-				}, args.toArray());
+		if (converter == null) {
+			jdbc.query("SELECT t.type, sum(t.amount) AS total" + from + " GROUP BY t.type",
+					(rs) -> {
+						sums.put(rs.getString("type"), rs.getBigDecimal("total"));
+					}, args.toArray());
+		}
+		else {
+			jdbc.query("SELECT t.type, t.currency, sum(t.amount) AS total" + from + " GROUP BY t.type, t.currency",
+					(rs) -> {
+						sums.merge(rs.getString("type"),
+								converter.convert(rs.getBigDecimal("total"), rs.getString("currency")), BigDecimal::add);
+					}, args.toArray());
+		}
 		if (filter.size() == 0) {
 			return new Result(List.of(), count, Totals.fromSums(sums)); // count and totals only
 		}
@@ -106,6 +126,14 @@ public final class TransactionSearch {
 				"SELECT t.id" + from + " ORDER BY t.date DESC, t.created_at DESC, t.id LIMIT ? OFFSET ?", UUID.class,
 				pageArgs.toArray());
 		return new Result(ids, count, Totals.fromSums(sums));
+	}
+
+	/** Turns a sum in one currency into the currency of the totals. */
+	@FunctionalInterface
+	public interface Converter {
+
+		BigDecimal convert(BigDecimal amount, String currency);
+
 	}
 
 	private static String placeholders(Collection<?> values) {

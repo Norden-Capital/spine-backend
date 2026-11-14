@@ -31,12 +31,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.nordencapital.spine.auth.AuthUser;
 import com.nordencapital.spine.common.ListFilter;
-import com.nordencapital.spine.common.ListPage;
 import com.nordencapital.spine.common.Names;
 import com.nordencapital.spine.common.ParentPatch;
 import com.nordencapital.spine.common.Websites;
 import com.nordencapital.spine.common.Totals;
-import com.nordencapital.spine.transaction.TransactionRequest;
 import com.nordencapital.spine.user.User;
 
 /**
@@ -61,9 +59,13 @@ public class WalletController {
 
 	private final WalletRecurring recurring;
 
+	private final WalletMoney money;
+
 	public WalletController(WalletLock lock, WalletCategories categories,
-			WalletTransactions transactions, WalletBudgets budgets, WalletGoals goals, WalletRecurring recurring) {
+			WalletTransactions transactions, WalletBudgets budgets, WalletGoals goals, WalletRecurring recurring,
+			WalletMoney money) {
 		this.lock = lock;
+		this.money = money;
 		this.categories = categories;
 		this.transactions = transactions;
 		this.budgets = budgets;
@@ -115,16 +117,20 @@ public class WalletController {
 	// ---- dashboard ----
 
 	@Operation(summary = "Wallet dashboard",
-			description = "Balance (all time), this month in/out/net, budgets, goals, 5 latest transactions.")
+			description = "Balance (all time), this month in/out/net, budgets, goals, 5 latest transactions. "
+					+ "balance, savedInGoals and thisMonth are in my default wallet currency (`currency`), each item "
+					+ "converted with my rate (`usdRate`: 1 USD = usdRate MAD). Budgets, goals and transactions keep "
+					+ "their own currency.")
 	@GetMapping("/api/wallet/dashboard")
 	public Dashboard dashboard(@AuthenticationPrincipal AuthUser actor, HttpServletRequest request) {
 		User user = me(actor, request);
 		YearMonth month = this.budgets.thisMonth(user.getId());
-		java.math.BigDecimal net = new java.math.BigDecimal(this.transactions.balance(user.getId()));
-		java.math.BigDecimal saved = this.goals.savedTotal(user.getId());
-		return new Dashboard(com.nordencapital.spine.common.Totals.money(net.subtract(saved)),
-				com.nordencapital.spine.common.Totals.money(saved),
-				this.transactions.totals(user.getId(), month.atDay(1), month.atEndOfMonth()),
+		WalletMoney.Settings settings = this.money.settings(user.getId());
+		java.math.BigDecimal net = this.transactions.balance(user.getId(), settings);
+		java.math.BigDecimal saved = this.goals.savedTotal(user.getId(), settings);
+		return new Dashboard(Totals.money(net.subtract(saved)), Totals.money(saved),
+				this.transactions.totals(user.getId(), month.atDay(1), month.atEndOfMonth(), settings),
+				settings.currency(), settings.usdRateText(),
 				this.budgets.list(user.getId()), this.goals.list(user.getId()), this.transactions.recent(user.getId(), 5));
 	}
 
@@ -189,9 +195,10 @@ public class WalletController {
 	// ---- transactions ----
 
 	@Operation(summary = "Search my wallet transactions", description = "Same filters and paging as company list "
-			+ "(no createdBy, q only in descriptions).")
+			+ "(no createdBy, q only in descriptions). minAmount/maxAmount compare each item's own amount. totals are "
+			+ "in my default wallet currency (`currency`), converted with my rate (`usdRate`: 1 USD = usdRate MAD).")
 	@GetMapping("/api/wallet/transactions")
-	public ListPage<WalletTransactions.WalletTx> listTransactions(@AuthenticationPrincipal AuthUser actor,
+	public WalletTransactions.WalletPage listTransactions(@AuthenticationPrincipal AuthUser actor,
 			@RequestParam(required = false) String from, @RequestParam(required = false) String to,
 			@RequestParam(required = false) String month, @RequestParam(required = false) String q,
 			@RequestParam(required = false) List<String> categoryIds,
@@ -209,18 +216,20 @@ public class WalletController {
 		return this.transactions.get(me(actor, request), id);
 	}
 
-	@Operation(summary = "Add a wallet transaction", description = "Files optional (0-5). 409 possible_duplicate "
+	@Operation(summary = "Add a wallet transaction", description = "Files optional (0-5). currency USD or MAD "
+			+ "(left out = my default wallet currency). 409 possible_duplicate (same type, amount, currency and date) "
 			+ "unless confirmDuplicate is true.")
 	@PostMapping("/api/wallet/transactions")
 	public ResponseEntity<WalletTransactions.WalletTx> createTransaction(@AuthenticationPrincipal AuthUser actor,
-			@Valid @RequestBody TransactionRequest body, HttpServletRequest request) {
+			@Valid @RequestBody WalletTransactionRequest body, HttpServletRequest request) {
 		return ResponseEntity.status(HttpStatus.CREATED).body(this.transactions.create(me(actor, request), body));
 	}
 
-	@Operation(summary = "Change a wallet transaction (send all fields)")
+	@Operation(summary = "Change a wallet transaction (send all fields)",
+			description = "currency left out = keep the transaction's currency.")
 	@PutMapping("/api/wallet/transactions/{id}")
 	public WalletTransactions.WalletTx updateTransaction(@AuthenticationPrincipal AuthUser actor,
-			@PathVariable UUID id, @Valid @RequestBody TransactionRequest body, HttpServletRequest request) {
+			@PathVariable UUID id, @Valid @RequestBody WalletTransactionRequest body, HttpServletRequest request) {
 		return this.transactions.update(me(actor, request), id, body);
 	}
 
@@ -235,19 +244,22 @@ public class WalletController {
 
 	// ---- budgets ----
 
+	@Operation(summary = "My monthly budgets", description = "Each budget has its own currency; spent = this month's "
+			+ "expenses converted into the budget's currency with my rate.")
 	@GetMapping("/api/wallet/budgets")
 	public List<WalletBudgets.Budget> budgets(@AuthenticationPrincipal AuthUser actor, HttpServletRequest request) {
 		return this.budgets.list(me(actor, request).getId());
 	}
 
-	@Operation(summary = "Add a monthly budget", description = "No categoryId = total budget. "
-			+ "409 budget_exists.")
+	@Operation(summary = "Add a monthly budget", description = "No categoryId = total budget. currency USD or MAD "
+			+ "(left out = my default wallet currency). 409 budget_exists.")
 	@PostMapping("/api/wallet/budgets")
 	public ResponseEntity<WalletBudgets.Budget> createBudget(@AuthenticationPrincipal AuthUser actor,
 			@Valid @RequestBody WalletBudgets.BudgetRequest body, HttpServletRequest request) {
 		return ResponseEntity.status(HttpStatus.CREATED).body(this.budgets.create(me(actor, request).getId(), body));
 	}
 
+	@Operation(summary = "Change a budget", description = "currency left out = keep.")
 	@PutMapping("/api/wallet/budgets/{id}")
 	public WalletBudgets.Budget updateBudget(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody WalletBudgets.BudgetRequest body, HttpServletRequest request) {
@@ -263,11 +275,14 @@ public class WalletController {
 
 	// ---- goals ----
 
+	@Operation(summary = "My goals", description = "Each goal has its own currency (target, saved and movements "
+			+ "are in it).")
 	@GetMapping("/api/wallet/goals")
 	public List<WalletGoals.Goal> goals(@AuthenticationPrincipal AuthUser actor, HttpServletRequest request) {
 		return this.goals.list(me(actor, request).getId());
 	}
 
+	@Operation(summary = "Add a goal", description = "currency USD or MAD (left out = my default wallet currency).")
 	@PostMapping("/api/wallet/goals")
 	public ResponseEntity<WalletGoals.Goal> createGoal(@AuthenticationPrincipal AuthUser actor,
 			@Valid @RequestBody WalletGoals.GoalRequest body, HttpServletRequest request) {
@@ -282,6 +297,8 @@ public class WalletController {
 		return this.goals.reorder(me(actor, request).getId(), body.ids());
 	}
 
+	@Operation(summary = "Change a goal", description = "currency left out = keep. A new currency also applies to "
+			+ "the money already in the goal (not converted).")
 	@PutMapping("/api/wallet/goals/{id}")
 	public WalletGoals.Goal updateGoal(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody WalletGoals.GoalRequest body, HttpServletRequest request) {
@@ -295,8 +312,8 @@ public class WalletController {
 		return ResponseEntity.noContent().build();
 	}
 
-	@Operation(summary = "Add money to a goal", description = "Returns the whole goal. The money leaves the wallet "
-			+ "balance (it is a transfer: not counted as spending this month).")
+	@Operation(summary = "Add money to a goal", description = "Returns the whole goal. amount is in the goal's "
+			+ "currency. The money leaves the wallet balance (it is a transfer: not counted as spending this month).")
 	@PostMapping("/api/wallet/goals/{id}/contributions")
 	public ResponseEntity<WalletGoals.Goal> contribute(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody WalletGoals.ContributionRequest body, HttpServletRequest request) {
@@ -329,13 +346,16 @@ public class WalletController {
 	}
 
 	@Operation(summary = "Add a recurring item", description = "nextDate = first date on or after today; "
-			+ "if that is today, the transaction is made at once.")
+			+ "if that is today, the transaction is made at once. currency USD or MAD (left out = my default wallet "
+			+ "currency); its transactions are made in it.")
 	@PostMapping("/api/wallet/recurring")
 	public ResponseEntity<WalletRecurring.Recurring> createRecurring(@AuthenticationPrincipal AuthUser actor,
 			@Valid @RequestBody WalletRecurring.RecurringRequest body, HttpServletRequest request) {
 		return ResponseEntity.status(HttpStatus.CREATED).body(this.recurring.create(me(actor, request).getId(), body));
 	}
 
+	@Operation(summary = "Change a recurring item", description = "currency left out = keep. Transactions already "
+			+ "made keep their currency.")
 	@PutMapping("/api/wallet/recurring/{id}")
 	public WalletRecurring.Recurring updateRecurring(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody WalletRecurring.RecurringRequest body, HttpServletRequest request) {
@@ -436,8 +456,10 @@ public class WalletController {
 	 * wallet; taking it out of a goal, or deleting the goal, brings it back)
 	 * @param savedInGoals all money now in my goals
 	 * @param thisMonth this month in/out/net of transactions only (goal moves are transfers, not spending)
+	 * @param currency my default wallet currency: balance, savedInGoals and thisMonth are in it
+	 * @param usdRate my rate used for them, 1 USD = usdRate MAD, e.g. "10.00"
 	 */
-	public record Dashboard(String balance, String savedInGoals, Totals thisMonth,
+	public record Dashboard(String balance, String savedInGoals, Totals thisMonth, String currency, String usdRate,
 			List<WalletBudgets.Budget> budgets, List<WalletGoals.Goal> goals, List<WalletTransactions.WalletTx> recent) {
 	}
 

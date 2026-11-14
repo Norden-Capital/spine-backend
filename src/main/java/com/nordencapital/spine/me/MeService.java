@@ -138,13 +138,21 @@ public class MeService {
 
 	/**
 	 * Saves all preferences (fields already checked by bean validation).
-	 * @throws ApiException 400 {@code validation_error} if the time zone is unknown
+	 * @throws ApiException 400 {@code validation_error} if the time zone is unknown, or the
+	 * wallet rate is not more than 0 and at most 1000
 	 */
 	@Transactional
 	public Preferences savePreferences(AuthUser principal, Preferences values) {
 		if (values.timeZone() != null && !ZoneId.getAvailableZoneIds().contains(values.timeZone())) {
 			throw new ApiException(HttpStatus.BAD_REQUEST, "validation_error",
 					"timeZone: must be an IANA time zone id like America/Toronto, or null");
+		}
+		if (values.walletUsdRate() != null) {
+			java.math.BigDecimal rate = new java.math.BigDecimal(values.walletUsdRate());
+			if (rate.signum() <= 0 || rate.compareTo(Preferences.MAX_USD_RATE) > 0) {
+				throw new ApiException(HttpStatus.BAD_REQUEST, "validation_error",
+						"walletUsdRate: must be more than 0 and at most 1000");
+			}
 		}
 		User user = activeUser(principal);
 		UserPreferences row = this.preferences.findById(user.getId())

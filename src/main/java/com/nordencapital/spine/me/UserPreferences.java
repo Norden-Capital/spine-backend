@@ -1,5 +1,6 @@
 package com.nordencapital.spine.me;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -35,6 +36,14 @@ public class UserPreferences {
 	@Column(name = "text_size", nullable = false, length = 10)
 	private String textSize;
 
+	/** Private wallet: default currency, USD or MAD. */
+	@Column(name = "wallet_currency", nullable = false, length = 3)
+	private String walletCurrency = "USD";
+
+	/** Private wallet: 1 USD = this many MAD. */
+	@Column(name = "wallet_usd_rate", nullable = false, precision = 12, scale = 4)
+	private BigDecimal walletUsdRate = Preferences.DEFAULT_USD_RATE;
+
 	@Column(name = "updated_at", nullable = false)
 	private Instant updatedAt;
 
@@ -51,11 +60,19 @@ public class UserPreferences {
 		this.theme = values.theme();
 		this.font = values.font();
 		this.textSize = values.textSize();
+		// Wallet fields: null = keep (older apps do not send them).
+		if (values.walletCurrency() != null) {
+			this.walletCurrency = values.walletCurrency();
+		}
+		if (values.walletUsdRate() != null) {
+			this.walletUsdRate = new BigDecimal(values.walletUsdRate());
+		}
 		this.updatedAt = now;
 	}
 
 	Preferences toPreferences() {
-		return new Preferences(this.dateFormat, this.timeZone, this.theme, this.font, this.textSize);
+		return new Preferences(this.dateFormat, this.timeZone, this.theme, this.font, this.textSize,
+				this.walletCurrency, Preferences.rateText(this.walletUsdRate));
 	}
 
 }

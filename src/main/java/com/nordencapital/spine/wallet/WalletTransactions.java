@@ -33,7 +33,6 @@ import com.nordencapital.spine.common.ApiException;
 import com.nordencapital.spine.common.CategoryKinds;
 import com.nordencapital.spine.common.DuplicateException;
 import com.nordencapital.spine.common.ListFilter;
-import com.nordencapital.spine.common.ListPage;
 import com.nordencapital.spine.common.Money;
 import com.nordencapital.spine.common.Totals;
 import com.nordencapital.spine.common.TransactionSearch;
@@ -44,7 +43,6 @@ import com.nordencapital.spine.file.StoredFile;
 import com.nordencapital.spine.file.StoredFileRepository;
 import com.nordencapital.spine.logo.LogoService;
 import com.nordencapital.spine.me.UserZones;
-import com.nordencapital.spine.transaction.TransactionRequest;
 import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
 import com.nordencapital.spine.user.User;
 
@@ -62,7 +60,7 @@ public class WalletTransactions {
 	private static final TransactionSearch SEARCH = new TransactionSearch("wallet_transactions",
 			"wallet_categories", null);
 
-	private static final String COLUMNS = "id, type, amount, date, description, website, category_id, recurring_id, "
+	private static final String COLUMNS = "id, type, amount, currency, date, description, website, category_id, recurring_id, "
 			+ "created_at, updated_at";
 
 	private final JdbcTemplate jdbc;
@@ -79,12 +77,15 @@ public class WalletTransactions {
 
 	private final LogoService logos;
 
+	private final WalletMoney money;
+
 	private final Clock clock;
 
 	public WalletTransactions(JdbcTemplate jdbc, WalletCategories categories,
 			StoredFileRepository files, FileService fileService, WalletBudgets budgets, UserZones zones,
-			LogoService logos, Clock clock) {
+			LogoService logos, WalletMoney money, Clock clock) {
 		this.jdbc = jdbc;
+		this.money = money;
 		this.categories = categories;
 		this.files = files;
 		this.fileService = fileService;
@@ -94,13 +95,16 @@ public class WalletTransactions {
 		this.clock = clock;
 	}
 
+	/** One page; the totals of all matches are in my default currency. */
 	@Transactional(readOnly = true)
-	public ListPage<WalletTx> list(User user, ListFilter.Params params) {
+	public WalletPage list(User user, ListFilter.Params params) {
 		ZoneId zone = this.zones.saved(user.getId()).orElse(ZoneOffset.UTC);
 		ListFilter filter = ListFilter.parse(params, YearMonth.now(this.clock.withZone(zone)));
-		TransactionSearch.Result result = SEARCH.run(this.jdbc, filter, "t.user_id = ?", List.of(user.getId()), null);
-		return new ListPage<>(load(user.getId(), result.ids()), result.totals(), filter.page(), filter.size(),
-				result.count(), result.hasNext(filter));
+		WalletMoney.Settings settings = this.money.settings(user.getId());
+		TransactionSearch.Result result = SEARCH.run(this.jdbc, filter, "t.user_id = ?", List.of(user.getId()), null,
+				settings::toDefault);
+		return new WalletPage(load(user.getId(), result.ids()), result.totals(), settings.currency(),
+				settings.usdRateText(), filter.page(), filter.size(), result.count(), result.hasNext(filter));
 	}
 
 	/** @throws ApiException 404 {@code transaction_not_found} */
@@ -118,10 +122,11 @@ public class WalletTransactions {
 
 	/**
 	 * @throws ApiException 400 {@code validation_error} / {@code future_date}
-	 * @throws DuplicateException (409) one of my transactions has the same type, amount and date, and confirmDuplicate is not true
+	 * @throws DuplicateException (409) one of my transactions has the same type, amount, currency and date, and
+	 * confirmDuplicate is not true
 	 */
 	@Transactional
-	public WalletTx create(User user, TransactionRequest request) {
+	public WalletTx create(User user, WalletTransactionRequest request) {
 		Checked checked = check(user, request, null);
 		if (!Boolean.TRUE.equals(request.confirmDuplicate())) {
 			List<DuplicateException.Match> matches = duplicates(user, checked);
@@ -130,9 +135,9 @@ public class WalletTransactions {
 			}
 		}
 		UUID id = UUID.randomUUID();
-		this.jdbc.update("INSERT INTO wallet_transactions (id, user_id, type, amount, date, description, "
-				+ "website, category_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", id, user.getId(),
-				checked.type(), checked.amount(), Date.valueOf(checked.date()),
+		this.jdbc.update("INSERT INTO wallet_transactions (id, user_id, type, amount, currency, date, description, "
+				+ "website, category_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", id, user.getId(),
+				checked.type(), checked.amount(), checked.currency(), Date.valueOf(checked.date()),
 				checked.description(), checked.website(), checked.categoryId(), Timestamp.from(this.clock.instant()));
 		checked.files().forEach((file) -> attach(file, id));
 		this.budgets.checkAlerts(user.getId());
@@ -141,16 +146,16 @@ public class WalletTransactions {
 	}
 
 	/**
-	 * Full replace (no duplicate check). Files left out are deleted.
+	 * Full replace (no duplicate check). Files left out are deleted. Currency left out = keep.
 	 * @throws ApiException 404 {@code transaction_not_found}, 400
 	 */
 	@Transactional
-	public WalletTx update(User user, UUID id, TransactionRequest request) {
+	public WalletTx update(User user, UUID id, WalletTransactionRequest request) {
 		WalletTx existing = get(user, id);
 		Checked checked = check(user, request, existing);
-		this.jdbc.update("UPDATE wallet_transactions SET type = ?, amount = ?, date = ?, description = ?, "
+		this.jdbc.update("UPDATE wallet_transactions SET type = ?, amount = ?, currency = ?, date = ?, description = ?, "
 				+ "website = ?, category_id = ?, updated_at = ? WHERE id = ? AND user_id = ?", checked.type(),
-				checked.amount(), Date.valueOf(checked.date()), checked.description(),
+				checked.amount(), checked.currency(), Date.valueOf(checked.date()), checked.description(),
 				checked.website(), checked.categoryId(), Timestamp.from(this.clock.instant()), id, user.getId());
 		Set<UUID> keep = checked.files().stream().map(StoredFile::getId).collect(Collectors.toSet());
 		List<StoredFile> current = this.files.findAllByWalletTransactionIdInOrderByCreatedAtAsc(List.of(id));
@@ -181,19 +186,21 @@ public class WalletTransactions {
 				"/wallet/transactions/" + id);
 	}
 
-	/** INCOME - EXPENSE of all my transactions (USD). */
+	/** INCOME - EXPENSE of all my transactions, in the default currency of {@code settings} (not rounded). */
 	@Transactional(readOnly = true)
-	public String balance(UUID userId) {
-		return Totals.fromSums(sums(userId, null, null)).net();
+	public BigDecimal balance(UUID userId, WalletMoney.Settings settings) {
+		Map<String, BigDecimal> sums = sums(userId, null, null, settings);
+		return sums.getOrDefault("INCOME", BigDecimal.ZERO).subtract(sums.getOrDefault("EXPENSE", BigDecimal.ZERO));
 	}
 
-	/** In/out/net between two dates (included). */
+	/** In/out/net between two dates (included), in the default currency of {@code settings}. */
 	@Transactional(readOnly = true)
-	public Totals totals(UUID userId, LocalDate from, LocalDate to) {
-		return Totals.fromSums(sums(userId, from, to));
+	public Totals totals(UUID userId, LocalDate from, LocalDate to, WalletMoney.Settings settings) {
+		return Totals.fromSums(sums(userId, from, to, settings));
 	}
 
-	private Map<String, BigDecimal> sums(UUID userId, LocalDate from, LocalDate to) {
+	/** Sums per type, each currency converted into the default currency (not rounded). */
+	private Map<String, BigDecimal> sums(UUID userId, LocalDate from, LocalDate to, WalletMoney.Settings settings) {
 		List<Object> args = new ArrayList<>(List.of(userId));
 		String where = "user_id = ?";
 		if (from != null) {
@@ -202,17 +209,20 @@ public class WalletTransactions {
 			args.add(Date.valueOf(to));
 		}
 		Map<String, BigDecimal> sums = new HashMap<>();
-		this.jdbc.query("SELECT type, sum(amount) AS total FROM wallet_transactions WHERE " + where + " GROUP BY type",
-				(rs) -> {
-					sums.put(rs.getString("type"), rs.getBigDecimal("total"));
+		this.jdbc.query("SELECT type, currency, sum(amount) AS total FROM wallet_transactions WHERE " + where
+				+ " GROUP BY type, currency", (rs) -> {
+					sums.merge(rs.getString("type"),
+							settings.toDefault(rs.getBigDecimal("total"), rs.getString("currency")), BigDecimal::add);
 				}, args.toArray());
 		return sums;
 	}
 
 	// ---- checks ----
 
-	private Checked check(User user, TransactionRequest request, WalletTx existing) {
+	private Checked check(User user, WalletTransactionRequest request, WalletTx existing) {
 		BigDecimal amount = Money.parse("amount", request.amount());
+		String currency = WalletMoney.pick(request.currency(),
+				(existing != null) ? existing.currency() : this.money.settings(user.getId()).currency());
 		LocalDate date;
 		try {
 			date = LocalDate.parse(request.date());
@@ -250,7 +260,7 @@ public class WalletTransactions {
 			throw invalid("fileIds: use files you just uploaded, or files already on this transaction");
 		}
 		foundFiles.sort(Comparator.comparing(StoredFile::getCreatedAt));
-		return new Checked(request.type(), amount, date, request.description(), website,
+		return new Checked(request.type(), amount, currency, date, request.description(), website,
 				category.id(), foundFiles);
 	}
 
@@ -259,10 +269,10 @@ public class WalletTransactions {
 				user.avatarSeed());
 		return this.jdbc.query(
 				"SELECT id, description, created_at FROM wallet_transactions WHERE user_id = ? AND type = ? AND amount = ? "
-						+ "AND date = ? ORDER BY created_at DESC LIMIT 5",
+						+ "AND currency = ? AND date = ? ORDER BY created_at DESC LIMIT 5",
 				(rs, row) -> new DuplicateException.Match(rs.getObject("id", UUID.class), rs.getString("description"), me,
 						rs.getTimestamp("created_at").toInstant()),
-				user.getId(), checked.type(), checked.amount(), Date.valueOf(checked.date()));
+				user.getId(), checked.type(), checked.amount(), checked.currency(), Date.valueOf(checked.date()));
 	}
 
 	/** Through the entity, so the loaded file objects stay right (the row exists already). */
@@ -307,7 +317,7 @@ public class WalletTransactions {
 					(category != null) ? category.website() : null, (parent != null) ? parent.website() : null);
 			CategoryRef categoryRef = (category != null) ? new CategoryRef(category.id(), category.name(),
 					category.icon(), category.archived(), category.parentId(), category.kind()) : null;
-			result.add(new WalletTx(id, row.type(), Totals.money(row.amount()), row.date(),
+			result.add(new WalletTx(id, row.type(), Totals.money(row.amount()), row.currency(), row.date(),
 					row.description(), row.website(), txLogoUrls, categoryRef, filesByTx.getOrDefault(id, List.of()), row.recurringId(),
 					row.createdAt(), row.updatedAt()));
 		}
@@ -316,7 +326,7 @@ public class WalletTransactions {
 
 	private static Row map(ResultSet rs, int rowNum) throws SQLException {
 		return new Row(rs.getObject("id", UUID.class), rs.getString("type"), rs.getBigDecimal("amount"),
-				rs.getDate("date").toLocalDate(), rs.getString("description"),
+				rs.getString("currency"), rs.getDate("date").toLocalDate(), rs.getString("description"),
 				rs.getString("website"), rs.getObject("category_id", UUID.class), rs.getObject("recurring_id", UUID.class),
 				rs.getTimestamp("created_at").toInstant(),
 				(rs.getTimestamp("updated_at") != null) ? rs.getTimestamp("updated_at").toInstant() : null);
@@ -335,24 +345,38 @@ public class WalletTransactions {
 		return new ApiException(HttpStatus.BAD_REQUEST, "validation_error", message);
 	}
 
-	private record Row(UUID id, String type, BigDecimal amount, LocalDate date, String description,
+	private record Row(UUID id, String type, BigDecimal amount, String currency, LocalDate date, String description,
 			String website, UUID categoryId, UUID recurringId, Instant createdAt, Instant updatedAt) {
 	}
 
-	private record Checked(String type, BigDecimal amount, LocalDate date, String description,
+	private record Checked(String type, BigDecimal amount, String currency, LocalDate date, String description,
 			String website, UUID categoryId, List<StoredFile> files) {
 	}
 
 	/**
 	 * A wallet transaction as the API returns it.
+	 * @param amount in {@code currency}
+	 * @param currency USD or MAD
 	 * @param website bare domain like "claude.ai", or null
 	 * @param logoUrls logo image URLs to try in the browser, in order; empty = category icon
 	 * @param recurringId the recurring item that made it (null if added by hand)
 	 * @param updatedAt null if never changed
 	 */
-	public record WalletTx(UUID id, String type, String amount, LocalDate date, String description,
+	public record WalletTx(UUID id, String type, String amount, String currency, LocalDate date, String description,
 			String website, List<String> logoUrls, CategoryRef category, List<FileResponse> files, UUID recurringId, Instant createdAt,
 			Instant updatedAt) {
+	}
+
+	/**
+	 * One page of my wallet transactions.
+	 * @param totals in/out/net of ALL matching items, in {@code currency} (converted with {@code usdRate})
+	 * @param currency my default wallet currency (the currency of the totals)
+	 * @param usdRate my rate, 1 USD = usdRate MAD, e.g. "10.00"
+	 * @param page 0-based
+	 * @param totalItems all matching items
+	 */
+	public record WalletPage(List<WalletTx> items, Totals totals, String currency, String usdRate, int page, int size,
+			long totalItems, boolean hasNext) {
 	}
 
 }

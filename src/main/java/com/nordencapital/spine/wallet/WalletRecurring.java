@@ -40,7 +40,8 @@ import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
  * Recurring wallet transactions (rent, salary...). A job runs every hour: for each
  * active item due today or earlier (in its owner's time zone, UTC if automatic) it
  * creates the wallet transaction for that date (never twice for the same date), moves
- * the next date on and adds an alert. It also warns one day before.
+ * the next date on and adds an alert. It also warns one day before. Each item has its own
+ * currency (USD or MAD); the transactions it makes are in that currency.
  */
 @Component
 public class WalletRecurring {
@@ -53,7 +54,7 @@ public class WalletRecurring {
 
 	private static final Logger logger = LoggerFactory.getLogger(WalletRecurring.class);
 
-	private static final String COLUMNS = "id, user_id, name, type, amount, category_id, description, "
+	private static final String COLUMNS = "id, user_id, name, type, amount, currency, category_id, description, "
 			+ "repeat_unit, repeat_every, start_date, next_date, active, paused_until";
 
 	private final JdbcTemplate jdbc;
@@ -68,11 +69,14 @@ public class WalletRecurring {
 
 	private final TransactionTemplate transaction;
 
+	private final WalletMoney money;
+
 	private final Clock clock;
 
 	public WalletRecurring(JdbcTemplate jdbc, WalletCategories categories, WalletBudgets budgets, AlertService alerts,
-			UserZones zones, TransactionTemplate transaction, Clock clock) {
+			UserZones zones, TransactionTemplate transaction, WalletMoney money, Clock clock) {
 		this.jdbc = jdbc;
+		this.money = money;
 		this.categories = categories;
 		this.budgets = budgets;
 		this.alerts = alerts;
@@ -91,27 +95,32 @@ public class WalletRecurring {
 	@Transactional
 	public Recurring create(UUID userId, RecurringRequest request) {
 		Valid valid = check(userId, request, null);
+		String currency = WalletMoney.pick(request.currency(), this.money.settings(userId).currency());
 		UUID id = UUID.randomUUID();
 		Timestamp now = Timestamp.from(this.clock.instant());
-		this.jdbc.update("INSERT INTO wallet_recurring (id, user_id, name, type, amount, category_id, description, "
-				+ "repeat_unit, repeat_every, start_date, next_date, active, created_at, updated_at) "
-				+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, true, ?, ?)", id, userId, request.name(), request.type(),
-				valid.amount(), request.categoryId(), request.description(), request.unit(), request.every(),
+		this.jdbc.update("INSERT INTO wallet_recurring (id, user_id, name, type, amount, currency, category_id, "
+				+ "description, repeat_unit, repeat_every, start_date, next_date, active, created_at, updated_at) "
+				+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, true, ?, ?)", id, userId, request.name(), request.type(),
+				valid.amount(), currency, request.categoryId(), request.description(), request.unit(), request.every(),
 				Date.valueOf(valid.start()),
 				Date.valueOf(nextOnOrAfter(valid.start(), request.unit(), request.every(), today(userId))), now, now);
 		runOne(id);
 		return one(userId, id);
 	}
 
-	/** Full replace; the next date is calculated again. @throws ApiException 404, 400 */
+	/**
+	 * Full replace (currency left out = keep); the next date is calculated again. Transactions
+	 * already made keep their currency.
+	 * @throws ApiException 404, 400
+	 */
 	@Transactional
 	public Recurring update(UUID userId, UUID id, RecurringRequest request) {
 		Row existing = mine(userId, id);
 		Valid valid = check(userId, request, existing);
-		this.jdbc.update("UPDATE wallet_recurring SET name = ?, type = ?, amount = ?, category_id = ?, "
+		this.jdbc.update("UPDATE wallet_recurring SET name = ?, type = ?, amount = ?, currency = ?, category_id = ?, "
 				+ "description = ?, repeat_unit = ?, repeat_every = ?, start_date = ?, next_date = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-				request.name(), request.type(), valid.amount(), request.categoryId(),
-				request.description(), request.unit(), request.every(), Date.valueOf(valid.start()),
+				request.name(), request.type(), valid.amount(), WalletMoney.pick(request.currency(), existing.currency()),
+				request.categoryId(), request.description(), request.unit(), request.every(), Date.valueOf(valid.start()),
 				Date.valueOf(nextOnOrAfter(valid.start(), request.unit(), request.every(), from(existing, userId))),
 				Timestamp.from(this.clock.instant()), id, userId);
 		runOne(id);
@@ -261,11 +270,11 @@ public class WalletRecurring {
 				continue;
 			}
 			UUID txId = UUID.randomUUID();
-			int inserted = this.jdbc.update("INSERT INTO wallet_transactions (id, user_id, type, amount, date, "
-					+ "description, category_id, recurring_id, recurring_date, created_at) "
-					+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+			int inserted = this.jdbc.update("INSERT INTO wallet_transactions (id, user_id, type, amount, currency, "
+					+ "date, description, category_id, recurring_id, recurring_date, created_at) "
+					+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
 					+ "ON CONFLICT (recurring_id, recurring_date) WHERE recurring_id IS NOT NULL DO NOTHING", txId,
-					row.userId(), row.type(), row.amount(), Date.valueOf(next), row.description(),
+					row.userId(), row.type(), row.amount(), row.currency(), Date.valueOf(next), row.description(),
 					row.categoryId(), row.id(), Date.valueOf(next), Timestamp.from(this.clock.instant()));
 			if (inserted > 0) {
 				created++;
@@ -356,14 +365,14 @@ public class WalletRecurring {
 			.map((date) -> new Recurrence.Upcoming(date, made.contains(date) ? "DONE" : skips.contains(date) ? "SKIPPED"
 					: (!row.active() || (pausedUntil != null && date.isBefore(pausedUntil))) ? "PAUSED" : "UPCOMING"))
 			.toList();
-		return new Recurring(row.id(), row.name(), row.type(), Totals.money(row.amount()), category,
+		return new Recurring(row.id(), row.name(), row.type(), Totals.money(row.amount()), row.currency(), category,
 				row.description(), row.unit(), row.every(), row.startDate(), nextDate, row.active(), pausedUntil,
 				upcoming);
 	}
 
 	private static Row map(ResultSet rs, int rowNum) throws SQLException {
 		return new Row(rs.getObject("id", UUID.class), rs.getObject("user_id", UUID.class), rs.getString("name"),
-				rs.getString("type"), rs.getBigDecimal("amount"),
+				rs.getString("type"), rs.getBigDecimal("amount"), rs.getString("currency"),
 				rs.getObject("category_id", UUID.class), rs.getString("description"), rs.getString("repeat_unit"),
 				rs.getInt("repeat_every"),
 				rs.getDate("start_date").toLocalDate(), rs.getDate("next_date").toLocalDate(), rs.getBoolean("active"),
@@ -373,13 +382,15 @@ public class WalletRecurring {
 	private record Valid(BigDecimal amount, LocalDate start) {
 	}
 
-	private record Row(UUID id, UUID userId, String name, String type, BigDecimal amount,
+	private record Row(UUID id, UUID userId, String name, String type, BigDecimal amount, String currency,
 			UUID categoryId, String description, String unit, int every, LocalDate startDate, LocalDate nextDate,
 			boolean active, LocalDate pausedUntil) {
 	}
 
 	/**
 	 * A recurring item as the API returns it.
+	 * @param amount in {@code currency}
+	 * @param currency USD or MAD (the transactions it makes are in it)
 	 * @param unit DAY, WEEK, MONTH or YEAR
 	 * @param every every N units (MONTH/3 = every 3 months)
 	 * @param nextDate the next date that will be made (skipped dates left out)
@@ -387,7 +398,7 @@ public class WalletRecurring {
 	 * @param pausedUntil paused until this date (then it goes on by itself), or null
 	 * @param upcoming the next 6 dates from today with their status
 	 */
-	public record Recurring(UUID id, String name, String type, String amount, CategoryRef category,
+	public record Recurring(UUID id, String name, String type, String amount, String currency, CategoryRef category,
 			String description, String unit, int every, LocalDate startDate, LocalDate nextDate, boolean active,
 			LocalDate pausedUntil, List<Recurrence.Upcoming> upcoming) {
 	}
@@ -398,6 +409,9 @@ public class WalletRecurring {
 					message = "must not contain control characters") String name,
 			@NotNull @Pattern(regexp = "EXPENSE|INCOME", message = "must be EXPENSE or INCOME") String type,
 			@NotNull String amount,
+			@io.swagger.v3.oas.annotations.media.Schema(allowableValues = { "USD", "MAD" }, nullable = true,
+					description = "Create: left out = my default wallet currency. Change: left out = keep.")
+			@Pattern(regexp = "USD|MAD", message = "must be USD or MAD") String currency,
 			@NotNull UUID categoryId,
 			@NotBlank @Size(max = 200) @Pattern(regexp = Names.NO_CONTROL_CHARS,
 					message = "must not contain control characters") String description,

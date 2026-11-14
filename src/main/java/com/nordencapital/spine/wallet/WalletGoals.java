@@ -29,17 +29,22 @@ import com.nordencapital.spine.common.Names;
 import com.nordencapital.spine.common.Totals;
 
 /**
- * Saving goals with contributions. Contributions do not change the wallet balance.
+ * Saving goals with contributions. Each goal has its own currency (USD or MAD); its target,
+ * contributions, saved and percent are in that currency. Money in goals leaves the wallet
+ * balance (see the dashboard).
  */
 @Component
 public class WalletGoals {
 
 	private final JdbcTemplate jdbc;
 
+	private final WalletMoney money;
+
 	private final Clock clock;
 
-	public WalletGoals(JdbcTemplate jdbc, Clock clock) {
+	public WalletGoals(JdbcTemplate jdbc, WalletMoney money, Clock clock) {
 		this.jdbc = jdbc;
+		this.money = money;
 		this.clock = clock;
 	}
 
@@ -47,10 +52,12 @@ public class WalletGoals {
 	@Transactional(readOnly = true)
 	public List<Goal> list(UUID userId) {
 		List<Object[]> goals = this.jdbc.query(
-				"SELECT id, name, target, deadline FROM wallet_goals WHERE user_id = ? ORDER BY position, created_at, id",
+				"SELECT id, name, target, deadline, currency FROM wallet_goals WHERE user_id = ? "
+						+ "ORDER BY position, created_at, id",
 				(rs, row) -> new Object[] { rs.getObject("id", UUID.class), rs.getString("name"),
 						rs.getBigDecimal("target"),
-						(rs.getDate("deadline") != null) ? rs.getDate("deadline").toLocalDate() : null },
+						(rs.getDate("deadline") != null) ? rs.getDate("deadline").toLocalDate() : null,
+						rs.getString("currency") },
 				userId);
 		Map<UUID, List<Contribution>> contributions = new HashMap<>();
 		Map<UUID, BigDecimal> saved = new HashMap<>();
@@ -69,7 +76,7 @@ public class WalletGoals {
 			BigDecimal target = (BigDecimal) g[2];
 			BigDecimal total = saved.getOrDefault(id, BigDecimal.ZERO);
 			int percent = total.multiply(BigDecimal.valueOf(100)).divide(target, 0, RoundingMode.FLOOR).intValue();
-			return new Goal(id, (String) g[1], Totals.money(target), (LocalDate) g[3],
+			return new Goal(id, (String) g[1], Totals.money(target), (String) g[4], (LocalDate) g[3],
 					Totals.money(total), percent, contributions.getOrDefault(id, List.of()));
 		}).toList();
 	}
@@ -78,23 +85,28 @@ public class WalletGoals {
 	@Transactional
 	public Goal create(UUID userId, GoalRequest request) {
 		BigDecimal target = Money.parse("target", request.target());
+		String currency = WalletMoney.pick(request.currency(), this.money.settings(userId).currency());
 		UUID id = UUID.randomUUID();
 		Timestamp now = Timestamp.from(this.clock.instant());
 		// A new goal goes last.
-		this.jdbc.update("INSERT INTO wallet_goals (id, user_id, name, target, deadline, position, created_at, "
-				+ "updated_at) SELECT ?, ?, ?, ?, ?, coalesce(max(position) + 1, 0), ?, ? FROM wallet_goals "
-				+ "WHERE user_id = ?", id, userId, request.name(), target, date("deadline", request.deadline()), now,
-				now, userId);
+		this.jdbc.update("INSERT INTO wallet_goals (id, user_id, name, target, currency, deadline, position, "
+				+ "created_at, updated_at) SELECT ?, ?, ?, ?, ?, ?, coalesce(max(position) + 1, 0), ?, ? FROM wallet_goals "
+				+ "WHERE user_id = ?", id, userId, request.name(), target, currency, date("deadline", request.deadline()),
+				now, now, userId);
 		return one(userId, id);
 	}
 
-	/** @throws ApiException 404 {@code goal_not_found}, 400 */
+	/**
+	 * Currency left out = keep. A new currency also applies to the money already in the goal
+	 * (amounts are not converted).
+	 * @throws ApiException 404 {@code goal_not_found}, 400
+	 */
 	@Transactional
 	public Goal update(UUID userId, UUID id, GoalRequest request) {
 		mine(userId, id);
 		BigDecimal target = Money.parse("target", request.target());
-		this.jdbc.update("UPDATE wallet_goals SET name = ?, target = ?, deadline = ?, updated_at = ? "
-				+ "WHERE id = ? AND user_id = ?", request.name(), target,
+		this.jdbc.update("UPDATE wallet_goals SET name = ?, target = ?, currency = coalesce(?, currency), deadline = ?, "
+				+ "updated_at = ? WHERE id = ? AND user_id = ?", request.name(), target, request.currency(),
 				date("deadline", request.deadline()), Timestamp.from(this.clock.instant()), id, userId);
 		return one(userId, id);
 	}
@@ -141,12 +153,18 @@ public class WalletGoals {
 		return move(userId, goalId, request, true);
 	}
 
-	/** All money now in my goals (it is not in the wallet balance). */
+	/**
+	 * All money now in my goals (it is not in the wallet balance), each goal converted into the
+	 * default currency of {@code settings} (not rounded).
+	 */
 	@Transactional(readOnly = true)
-	public BigDecimal savedTotal(UUID userId) {
-		BigDecimal total = this.jdbc.queryForObject("SELECT coalesce(sum(c.amount), 0) FROM wallet_goal_contributions c "
-				+ "JOIN wallet_goals g ON g.id = c.goal_id WHERE g.user_id = ?", BigDecimal.class, userId);
-		return (total != null) ? total : BigDecimal.ZERO;
+	public BigDecimal savedTotal(UUID userId, WalletMoney.Settings settings) {
+		BigDecimal[] total = { BigDecimal.ZERO };
+		this.jdbc.query("SELECT g.currency, sum(c.amount) AS total FROM wallet_goal_contributions c "
+				+ "JOIN wallet_goals g ON g.id = c.goal_id WHERE g.user_id = ? GROUP BY g.currency", (rs) -> {
+					total[0] = total[0].add(settings.toDefault(rs.getBigDecimal("total"), rs.getString("currency")));
+				}, userId);
+		return total[0];
 	}
 
 	private BigDecimal saved(UUID goalId) {
@@ -156,9 +174,10 @@ public class WalletGoals {
 		return (total != null) ? total : BigDecimal.ZERO;
 	}
 
-	private static ApiException notEnoughSaved(BigDecimal saved) {
+	private ApiException notEnoughSaved(UUID goalId, BigDecimal saved) {
+		String currency = this.jdbc.queryForObject("SELECT currency FROM wallet_goals WHERE id = ?", String.class, goalId);
 		return new ApiException(HttpStatus.CONFLICT, "not_enough_saved",
-				"This goal holds only $" + Totals.money(saved));
+				"This goal holds only " + WalletMoney.format(saved, currency));
 	}
 
 	private Goal move(UUID userId, UUID goalId, ContributionRequest request, boolean takeOut) {
@@ -168,7 +187,7 @@ public class WalletGoals {
 		if (takeOut) {
 			BigDecimal saved = saved(goalId);
 			if (amount.compareTo(saved) > 0) {
-				throw notEnoughSaved(saved);
+				throw notEnoughSaved(goalId, saved);
 			}
 			amount = amount.negate();
 		}
@@ -193,7 +212,7 @@ public class WalletGoals {
 				contributionId, goalId);
 		// Removing an "add" must not leave the goal below 0 (money already taken out).
 		if (!amount.isEmpty() && saved(goalId).subtract(amount.get(0)).signum() < 0) {
-			throw notEnoughSaved(saved(goalId));
+			throw notEnoughSaved(goalId, saved(goalId));
 		}
 		int deleted = this.jdbc.update("DELETE FROM wallet_goal_contributions WHERE id = ? AND goal_id = ?",
 				contributionId, goalId);
@@ -232,17 +251,20 @@ public class WalletGoals {
 	}
 
 	/**
+	 * @param target in {@code currency}
+	 * @param currency the goal's currency, USD or MAD (its contributions are in it too)
+	 * @param saved in {@code currency}
 	 * @param percent whole number, can be over 100
 	 * @param contributions newest first
 	 */
-	public record Goal(UUID id, String name, String target, LocalDate deadline, String saved,
+	public record Goal(UUID id, String name, String target, String currency, LocalDate deadline, String saved,
 			int percent, List<Contribution> contributions) {
 	}
 
 	/**
 	 * One movement of a goal.
 	 * @param type ADD (money put in, out of the wallet balance) or TAKE_OUT (back to the balance)
-	 * @param amount always positive
+	 * @param amount always positive, in the goal's currency
 	 */
 	public record Contribution(UUID id, String type, String amount, LocalDate date, String note) {
 	}
@@ -256,7 +278,10 @@ public class WalletGoals {
 			@NotBlank @Size(max = 60) @Pattern(regexp = Names.NO_CONTROL_CHARS,
 					message = "must not contain control characters") String name,
 			@NotNull String target,
-			@Pattern(regexp = "[0-9]{4}-[0-9]{2}-[0-9]{2}", message = "must be like 2026-12-31") String deadline) {
+			@Pattern(regexp = "[0-9]{4}-[0-9]{2}-[0-9]{2}", message = "must be like 2026-12-31") String deadline,
+			@io.swagger.v3.oas.annotations.media.Schema(allowableValues = { "USD", "MAD" }, nullable = true,
+					description = "Create: left out = my default wallet currency. Change: left out = keep.")
+			@Pattern(regexp = "USD|MAD", message = "must be USD or MAD") String currency) {
 
 		public GoalRequest {
 			name = Names.clean(name);
@@ -268,6 +293,7 @@ public class WalletGoals {
 	public record OrderRequest(@NotNull List<UUID> ids) {
 	}
 
+	/** @param amount in the goal's currency */
 	public record ContributionRequest(@NotNull String amount,
 			@NotNull @Pattern(regexp = "[0-9]{4}-[0-9]{2}-[0-9]{2}", message = "must be like 2026-03-31") String date,
 			@Size(max = 200) String note) {

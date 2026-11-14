@@ -26,8 +26,10 @@ import com.nordencapital.spine.me.UserZones;
 import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
 
 /**
- * Monthly budgets (USD): a limit, either for everything (no category) or for one
- * category and its subcategories. Alerts at 80% and 100%, once per budget per month.
+ * Monthly budgets: a limit in the budget's own currency (USD or MAD), either for everything
+ * (no category) or for one category and its subcategories. "Spent" = this month's expenses
+ * converted into the budget's currency with my rate. Alerts at 80% and 100%, once per budget
+ * per month.
  */
 @Component
 public class WalletBudgets {
@@ -40,11 +42,14 @@ public class WalletBudgets {
 
 	private final UserZones zones;
 
+	private final WalletMoney money;
+
 	private final Clock clock;
 
 	public WalletBudgets(JdbcTemplate jdbc, WalletCategories categories, AlertService alerts, UserZones zones,
-			Clock clock) {
+			WalletMoney money, Clock clock) {
 		this.jdbc = jdbc;
+		this.money = money;
 		this.categories = categories;
 		this.alerts = alerts;
 		this.zones = zones;
@@ -56,17 +61,18 @@ public class WalletBudgets {
 	public List<Budget> list(UUID userId) {
 		YearMonth month = thisMonth(userId);
 		List<Row> rows = rows(userId);
+		WalletMoney.Settings settings = this.money.settings(userId);
 		Map<UUID, WalletCategories.Category> categoriesById = this.categories.byIds(userId,
 				rows.stream().map(Row::categoryId).filter(java.util.Objects::nonNull).collect(Collectors.toSet()));
 		return rows.stream().map((row) -> {
-			BigDecimal spent = spent(userId, row, month);
+			BigDecimal spent = spent(userId, row, month, settings);
 			int percent = spent.multiply(BigDecimal.valueOf(100)).divide(row.limit(), 0, RoundingMode.FLOOR).intValue();
 			String status = (percent >= 100) ? "EXCEEDED" : (percent >= 80) ? "WARNING" : "OK";
 			WalletCategories.Category category = (row.categoryId() != null) ? categoriesById.get(row.categoryId())
 					: null;
 			CategoryRef ref = (category != null) ? new CategoryRef(category.id(), category.name(), category.icon(),
 					category.archived(), category.parentId(), category.kind()) : null;
-			return new Budget(row.id(), Totals.money(row.limit()), ref, Totals.money(spent), percent,
+			return new Budget(row.id(), Totals.money(row.limit()), row.currency(), ref, Totals.money(spent), percent,
 					status);
 		}).toList();
 	}
@@ -78,11 +84,12 @@ public class WalletBudgets {
 	public Budget create(UUID userId, BudgetRequest request) {
 		BigDecimal limit = Money.parse("limit", request.limit());
 		checkCategory(userId, request.categoryId());
+		String currency = WalletMoney.pick(request.currency(), this.money.settings(userId).currency());
 		UUID id = UUID.randomUUID();
 		Timestamp now = Timestamp.from(this.clock.instant());
 		try {
-			this.jdbc.update("INSERT INTO wallet_budgets (id, user_id, amount, category_id, created_at, "
-					+ "updated_at) VALUES (?, ?, ?, ?, ?, ?)", id, userId, limit,
+			this.jdbc.update("INSERT INTO wallet_budgets (id, user_id, amount, currency, category_id, created_at, "
+					+ "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", id, userId, limit, currency,
 					request.categoryId(), now, now);
 		}
 		catch (DuplicateKeyException ex) {
@@ -92,15 +99,15 @@ public class WalletBudgets {
 		return one(userId, id);
 	}
 
-	/** @throws ApiException 404 {@code budget_not_found}, 409 {@code budget_exists}, 400 */
+	/** Currency left out = keep. @throws ApiException 404 {@code budget_not_found}, 409 {@code budget_exists}, 400 */
 	@Transactional
 	public Budget update(UUID userId, UUID id, BudgetRequest request) {
 		mine(userId, id);
 		BigDecimal limit = Money.parse("limit", request.limit());
 		checkCategory(userId, request.categoryId());
 		try {
-			this.jdbc.update("UPDATE wallet_budgets SET amount = ?, category_id = ?, updated_at = ? "
-					+ "WHERE id = ? AND user_id = ?", limit, request.categoryId(),
+			this.jdbc.update("UPDATE wallet_budgets SET amount = ?, currency = coalesce(?, currency), category_id = ?, "
+					+ "updated_at = ? WHERE id = ? AND user_id = ?", limit, request.currency(), request.categoryId(),
 					Timestamp.from(this.clock.instant()), id, userId);
 		}
 		catch (DuplicateKeyException ex) {
@@ -119,7 +126,8 @@ public class WalletBudgets {
 
 	/**
 	 * Adds the 80% / 100% alerts for this month, once per budget per month. Texts show no
-	 * amounts.
+	 * amounts (alerts can be read with the wallet locked), so no currency either; the percent
+	 * is from "spent" converted into the budget's currency.
 	 */
 	@Transactional
 	public void checkAlerts(UUID userId) {
@@ -164,7 +172,8 @@ public class WalletBudgets {
 		}
 	}
 
-	private BigDecimal spent(UUID userId, Row row, YearMonth month) {
+	/** This month's expenses (all currencies) in the budget's currency, not rounded. */
+	private BigDecimal spent(UUID userId, Row row, YearMonth month, WalletMoney.Settings settings) {
 		String categoryFilter = "";
 		Object[] args;
 		if (row.categoryId() != null) {
@@ -176,17 +185,21 @@ public class WalletBudgets {
 			args = new Object[] { userId, Date.valueOf(month.atDay(1)),
 					Date.valueOf(month.atEndOfMonth()) };
 		}
-		BigDecimal spent = this.jdbc.queryForObject("SELECT coalesce(sum(amount), 0) FROM wallet_transactions "
-				+ "WHERE user_id = ? AND type = 'EXPENSE' AND date >= ? AND date <= ?" + categoryFilter,
-				BigDecimal.class, args);
-		return (spent != null) ? spent : BigDecimal.ZERO;
+		BigDecimal[] spent = { BigDecimal.ZERO };
+		this.jdbc.query("SELECT currency, sum(amount) AS total FROM wallet_transactions "
+				+ "WHERE user_id = ? AND type = 'EXPENSE' AND date >= ? AND date <= ?" + categoryFilter
+				+ " GROUP BY currency", (rs) -> {
+					spent[0] = spent[0]
+						.add(settings.convert(rs.getBigDecimal("total"), rs.getString("currency"), row.currency()));
+				}, args);
+		return spent[0];
 	}
 
 	private List<Row> rows(UUID userId) {
 		return this.jdbc.query(
-				"SELECT id, amount, category_id FROM wallet_budgets WHERE user_id = ? ORDER BY created_at",
+				"SELECT id, amount, currency, category_id FROM wallet_budgets WHERE user_id = ? ORDER BY created_at",
 				(rs, row) -> new Row(rs.getObject("id", UUID.class), rs.getBigDecimal("amount"),
-						rs.getObject("category_id", UUID.class)),
+						rs.getString("currency"), rs.getObject("category_id", UUID.class)),
 				userId);
 	}
 
@@ -199,21 +212,27 @@ public class WalletBudgets {
 				"You already have a budget for this category");
 	}
 
-	private record Row(UUID id, BigDecimal limit, UUID categoryId) {
+	private record Row(UUID id, BigDecimal limit, String currency, UUID categoryId) {
 	}
 
 	/**
+	 * @param limit in {@code currency}
+	 * @param currency the budget's currency, USD or MAD
 	 * @param category null = total budget
+	 * @param spent this month's expenses converted into {@code currency} (my rate)
 	 * @param percent whole number, can be over 100
 	 * @param status OK (under 80), WARNING (80-99), EXCEEDED (100 or more)
 	 */
-	public record Budget(UUID id, String limit, CategoryRef category, String spent, int percent,
+	public record Budget(UUID id, String limit, String currency, CategoryRef category, String spent, int percent,
 			String status) {
 	}
 
 	/** Body of POST and PUT /api/wallet/budgets. */
 	public record BudgetRequest(
-			@jakarta.validation.constraints.NotNull String limit, UUID categoryId) {
+			@jakarta.validation.constraints.NotNull String limit, UUID categoryId,
+			@io.swagger.v3.oas.annotations.media.Schema(allowableValues = { "USD", "MAD" }, nullable = true,
+					description = "Create: left out = my default wallet currency. Change: left out = keep.")
+			@jakarta.validation.constraints.Pattern(regexp = "USD|MAD", message = "must be USD or MAD") String currency) {
 	}
 
 }

@@ -110,14 +110,16 @@ public class MeController {
 		return ResponseEntity.noContent().build();
 	}
 
-	@Operation(summary = "My preferences", description = "Defaults if never saved.")
+	@Operation(summary = "My preferences", description = "Defaults if never saved (wallet: USD, rate \"10.00\").")
 	@ApiResponse(responseCode = "200", description = "OK")
 	@GetMapping("/preferences")
 	public Preferences preferences(@AuthenticationPrincipal AuthUser principal) {
 		return this.meService.preferences(principal);
 	}
 
-	@Operation(summary = "Save my preferences", description = "Send all fields.")
+	@Operation(summary = "Save my preferences",
+			description = "Send all fields. walletCurrency and walletUsdRate (private wallet: default currency and "
+					+ "1 USD = walletUsdRate MAD) may be null or left out = keep the saved value.")
 	@ApiResponse(responseCode = "200", description = "Saved")
 	@ApiResponse(responseCode = "400", description = "validation_error",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
