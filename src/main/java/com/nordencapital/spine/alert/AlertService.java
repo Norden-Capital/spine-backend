@@ -31,6 +31,12 @@ public class AlertService {
 
 	public static final String RECURRING_DUE_TOMORROW = "RECURRING_DUE_TOMORROW";
 
+	/** Scope: a company alert, sent to everyone in the company (all active users). */
+	public static final String COMPANY = "COMPANY";
+
+	/** Scope: a private alert (one person's wallet), only for that person. */
+	public static final String PRIVATE = "PRIVATE";
+
 	static final int MAX_LIST = 50;
 
 	private final JdbcTemplate jdbc;
@@ -46,14 +52,45 @@ public class AlertService {
 	}
 
 	/**
-	 * Adds an alert for a user, unless one with the same dedupe key exists.
+	 * Adds a PRIVATE alert for one person (their wallet), unless one with the same dedupe
+	 * key exists.
 	 * @return true if it was added
 	 */
 	@Transactional
 	public boolean add(UUID userId, String kind, String title, String body, String link, String dedupeKey) {
-		return this.jdbc.update("INSERT INTO notifications (id, user_id, kind, title, body, link, dedupe_key, created_at) "
-				+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (user_id, dedupe_key) DO NOTHING", UUID.randomUUID(), userId,
-				kind, title, body, link, dedupeKey, Timestamp.from(this.clock.instant())) > 0;
+		return add(userId, PRIVATE, kind, title, body, link, dedupeKey);
+	}
+
+	/**
+	 * Adds an alert for a user, unless one with the same dedupe key exists.
+	 * @param scope {@link #COMPANY} or {@link #PRIVATE}
+	 * @return true if it was added
+	 */
+	@Transactional
+	public boolean add(UUID userId, String scope, String kind, String title, String body, String link,
+			String dedupeKey) {
+		return this.jdbc.update("INSERT INTO notifications (id, user_id, scope, kind, title, body, link, dedupe_key, "
+				+ "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (user_id, dedupe_key) DO NOTHING",
+				UUID.randomUUID(), userId, scope, kind, title, body, link, dedupeKey,
+				Timestamp.from(this.clock.instant())) > 0;
+	}
+
+	/** Everyone in the company: all active users (owner and members). */
+	public List<UUID> companyUsers() {
+		return this.jdbc.queryForList("SELECT id FROM users WHERE status = 'ACTIVE'", UUID.class);
+	}
+
+	/**
+	 * Adds a COMPANY alert for everyone in the company, once per person (same dedupe key).
+	 * @return how many were added
+	 */
+	@Transactional
+	public int addForCompany(String kind, String title, String body, String link, String dedupeKey) {
+		int added = 0;
+		for (UUID userId : companyUsers()) {
+			added += add(userId, COMPANY, kind, title, body, link, dedupeKey) ? 1 : 0;
+		}
+		return added;
 	}
 
 	/** My newest alerts and how many are unread. */
@@ -63,9 +100,9 @@ public class AlertService {
 		Integer unread = this.jdbc.queryForObject(
 				"SELECT count(*) FROM notifications WHERE user_id = ? AND read_at IS NULL", Integer.class, user.getId());
 		List<Alert> items = this.jdbc.query(
-				"SELECT id, kind, title, body, link, read_at, created_at FROM notifications WHERE user_id = ? "
+				"SELECT id, scope, kind, title, body, link, read_at, created_at FROM notifications WHERE user_id = ? "
 						+ "ORDER BY created_at DESC, id LIMIT " + MAX_LIST,
-				(rs, row) -> new Alert(rs.getObject("id", UUID.class), rs.getString("kind"), rs.getString("title"),
+				(rs, row) -> new Alert(rs.getObject("id", UUID.class), rs.getString("scope"), rs.getString("kind"), rs.getString("title"),
 						rs.getString("body"), rs.getString("link"), rs.getTimestamp("read_at") != null,
 						rs.getTimestamp("created_at").toInstant()),
 				user.getId());
@@ -97,9 +134,10 @@ public class AlertService {
 	}
 
 	/**
+	 * @param scope COMPANY (sent to everyone in the company) or PRIVATE (only mine, from my wallet)
 	 * @param link a frontend path hint (may be null)
 	 */
-	public record Alert(UUID id, String kind, String title, String body, String link, boolean read,
+	public record Alert(UUID id, String scope, String kind, String title, String body, String link, boolean read,
 			Instant createdAt) {
 	}
 

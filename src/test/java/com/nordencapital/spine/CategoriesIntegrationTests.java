@@ -42,9 +42,11 @@ class CategoriesIntegrationTests extends IntegrationTestBase {
 		activeUser("emp@example.com", Role.MEMBER);
 		MvcTestResult result = loggedIn("emp@example.com").get("/api/categories/icons");
 		assertThat(result).hasStatus(HttpStatus.OK);
-		assertThat(result).bodyJson().extractingPath("$.length()").isEqualTo(50);
+		assertThat(result).bodyJson().extractingPath("$.length()").isEqualTo(96);
 		assertThat(result).bodyJson().extractingPath("$[0]").isEqualTo("plane");
-		assertThat(result).bodyJson().extractingPath("$[49]").isEqualTo("ellipsis");
+		assertThat(result).bodyJson().extractingPath("$[48]").isEqualTo("calendar");
+		assertThat(result).bodyJson().extractingPath("$[49]").isEqualTo("server");
+		assertThat(result).bodyJson().extractingPath("$[95]").isEqualTo("ellipsis");
 		// Every seeded category icon is allowed.
 		assertThat(result).bodyJson()
 			.extractingPath("$")

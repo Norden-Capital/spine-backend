@@ -76,6 +76,7 @@ public abstract class IntegrationTestBase {
 	@BeforeEach
 	void cleanDatabase() throws IOException {
 		this.jdbc.update("DELETE FROM logos");
+		this.jdbc.update("DELETE FROM balances");
 		this.jdbc.update("DELETE FROM company_recurring_occurrences");
 		this.jdbc.update("DELETE FROM company_recurring");
 		this.jdbc.update("DELETE FROM notifications");

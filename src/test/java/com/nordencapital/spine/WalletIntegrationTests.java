@@ -503,8 +503,8 @@ class WalletIntegrationTests extends IntegrationTestBase {
 	}
 
 	private void insertAlert(User user, String key) {
-		this.jdbc.update("INSERT INTO notifications (id, user_id, kind, title, body, dedupe_key, created_at) "
-				+ "VALUES (gen_random_uuid(), ?, 'BUDGET_80', 't', 'b', ?, now())", user.getId(), key);
+		this.jdbc.update("INSERT INTO notifications (id, user_id, scope, kind, title, body, dedupe_key, created_at) "
+				+ "VALUES (gen_random_uuid(), ?, 'PRIVATE', 'BUDGET_80', 't', 'b', ?, now())", user.getId(), key);
 	}
 
 	private static String created(MvcTestResult result) {

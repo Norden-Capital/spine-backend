@@ -55,8 +55,8 @@ import com.nordencapital.spine.user.User;
  * Company repeat expenses. REMINDERS ONLY: nothing is created automatically (a company
  * transaction needs proof files). Each due date becomes one occurrence that stays DUE
  * (overdue after its date) until a transaction is saved from it (DONE, linked) or an
- * the OWNER skips it (SKIPPED). The OWNER gets an in-app alert on the due day (in
- * their own time zone). Everyone can see the list and save a transaction from a reminder; only the OWNER changes it.
+ * the OWNER skips it (SKIPPED). Everyone in the company gets an in-app alert on the due day
+ * (in their own time zone). Everyone can see the list and save a transaction from a reminder; only the OWNER changes it.
  */
 @Service
 public class CompanyRecurring {
@@ -354,7 +354,7 @@ public class CompanyRecurring {
 
 	/**
 	 * Every hour: makes the occurrences whose date has come (nothing else is created),
-	 * then alerts the OWNER once their day has reached a due date.
+	 * then alerts everyone in the company once their day has reached a due date.
 	 * @return how many occurrences were made
 	 */
 	@Scheduled(initialDelayString = "PT2M", fixedDelayString = "PT1H")
@@ -410,10 +410,9 @@ public class CompanyRecurring {
 		return made;
 	}
 
-	/** One alert per DUE occurrence for the active OWNER, once their day has come. */
+	/** One COMPANY alert per DUE occurrence for everyone in the company, once their day has come. */
 	void sendAlerts() {
-		List<UUID> managers = this.jdbc.queryForList(
-				"SELECT id FROM users WHERE role = 'OWNER' AND status = 'ACTIVE'", UUID.class);
+		List<UUID> managers = this.alerts.companyUsers();
 		if (managers.isEmpty()) {
 			return;
 		}
@@ -423,7 +422,7 @@ public class CompanyRecurring {
 			LocalDate today = today(manager);
 			for (Occurrence occurrence : due) {
 				if (!occurrence.dueDate().isAfter(today)) {
-					this.alerts.add(manager, ALERT_KIND, title(occurrence.description()),
+					this.alerts.add(manager, AlertService.COMPANY, ALERT_KIND, title(occurrence.description()),
 							"$" + occurrence.amount() + " · due " + occurrence.dueDate()
 									+ ". Tap to add it with its proof.",
 							"/recurring/due/" + occurrence.id(), alertKey(occurrence.id()));

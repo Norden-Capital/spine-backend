@@ -50,7 +50,7 @@ class CompanyRecurringIntegrationTests extends IntegrationTestBase {
 		assertThat(count("transactions")).isZero();
 		assertThat(e.get("/api/recurring")).bodyJson().extractingPath("$[0].description").isEqualTo("Rent");
 
-		// The reminder, for everyone to see; alerts only for the OWNER.
+		// The reminder, for everyone to see; a COMPANY alert for everyone too.
 		MvcTestResult due = e.get("/api/recurring/due");
 		assertThat(due).bodyJson().extractingPath("$.length()").isEqualTo(1);
 		assertThat(due).bodyJson().extractingPath("$[0].status").isEqualTo("DUE");
@@ -59,8 +59,9 @@ class CompanyRecurringIntegrationTests extends IntegrationTestBase {
 		assertThat(due).bodyJson().extractingPath("$[0].category.name").isEqualTo("Food");
 		String occurrence = this.jdbc.queryForObject("SELECT id::text FROM company_recurring_occurrences", String.class);
 		assertThat(alerts(boss)).isEqualTo(1);
-		assertThat(alerts(other)).isZero();
-		assertThat(alerts(emp)).isZero();
+		assertThat(alerts(other)).isEqualTo(1);
+		assertThat(alerts(emp)).isEqualTo(1);
+		assertThat(e.get("/api/alerts")).bodyJson().extractingPath("$.items[0].scope").isEqualTo("COMPANY");
 		assertThat(b.get("/api/alerts")).bodyJson().extractingPath("$.items[0].title").isEqualTo("Rent is due");
 		assertThat(b.get("/api/alerts")).bodyJson().extractingPath("$.items[0].link")
 			.isEqualTo("/recurring/due/" + occurrence);
@@ -75,6 +76,7 @@ class CompanyRecurringIntegrationTests extends IntegrationTestBase {
 		assertThat(done).bodyJson().extractingPath("$.transactionId").isEqualTo(txId);
 		assertThat(b.get("/api/recurring/due")).bodyJson().extractingPath("$.length()").isEqualTo(0);
 		assertThat(unreadAlerts(boss)).isZero();
+		assertThat(unreadAlerts(emp)).isZero();
 
 		// Used twice: 409, and that second transaction is not saved.
 		MvcTestResult again = b.post("/api/transactions", tx(b, occurrence));

@@ -7,7 +7,7 @@ import org.springframework.http.HttpStatus;
 import com.nordencapital.spine.common.ApiException;
 
 /**
- * Icons a category may use (Lucide icon names), in the order the frontend shows them.
+ * Icons a category may use (icon keys the frontend draws), in the order the frontend shows them.
  * "ellipsis" is for the seeded "Other" category. This list is the single source of truth:
  * GET /api/categories/icons returns it and validation uses it.
  */
@@ -19,7 +19,14 @@ public final class CategoryIcons {
 			"truck", "wrench", "briefcase", "book-open", "graduation-cap", "stethoscope", "heart-pulse", "dumbbell",
 			"ticket", "film", "music", "receipt", "credit-card", "banknote", "landmark", "building-2", "house", "zap",
 			"droplet", "file-text", "printer", "megaphone", "users", "tag", "globe", "map-pin", "shirt", "baby",
-			"dog", "calendar", "ellipsis");
+			"dog", "calendar",
+			// Added for the bigger picker (same keys in the design kit).
+			"server", "cloud", "cloud-services", "code", "code-file", "api", "database", "shield", "lock", "key",
+			"subscription", "ai", "design", "palette", "devices", "keyboard", "headphones", "domain", "internet", "mail",
+			"chat", "ads", "chart", "freelancer", "contractor", "salary", "tax", "calculator", "bank-fee", "course",
+			"idea", "office", "folder", "archive", "map", "route", "cake", "client-payment", "invoice", "consulting",
+			"sales", "refund", "investment", "coins", "award", "bonus",
+			"ellipsis");
 
 	private CategoryIcons() {
 	}
