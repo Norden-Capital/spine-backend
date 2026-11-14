@@ -315,10 +315,9 @@ public class CompanyRecurring {
 	public void delete(AuthUser principal, UUID id) {
 		this.actors.owner(principal);
 		row(id);
-		this.jdbc.query("SELECT id FROM company_recurring_occurrences WHERE recurring_id = ? AND status = 'DUE'",
-				(rs) -> {
-					markAlertsRead(rs.getObject("id", UUID.class));
-				}, id);
+		// Its reminders go with it, so their alerts go too (their links would be dead).
+		this.jdbc.update("DELETE FROM notifications WHERE dedupe_key IN (SELECT 'company-recurring:' || id || ':due' "
+				+ "FROM company_recurring_occurrences WHERE recurring_id = ?)", id);
 		this.jdbc.update("DELETE FROM company_recurring WHERE id = ?", id);
 	}
 

@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.nordencapital.spine.auth.AuthUser;
 import com.nordencapital.spine.common.ApiException;
+import com.nordencapital.spine.push.PushService;
 import com.nordencapital.spine.user.Actors;
 import com.nordencapital.spine.user.User;
 
@@ -45,10 +46,13 @@ public class AlertService {
 
 	private final Clock clock;
 
-	public AlertService(JdbcTemplate jdbc, Actors actors, Clock clock) {
+	private final PushService push;
+
+	public AlertService(JdbcTemplate jdbc, Actors actors, Clock clock, PushService push) {
 		this.jdbc = jdbc;
 		this.actors = actors;
 		this.clock = clock;
+		this.push = push;
 	}
 
 	/**
@@ -62,17 +66,25 @@ public class AlertService {
 	}
 
 	/**
-	 * Adds an alert for a user, unless one with the same dedupe key exists.
+	 * Adds an alert for a user, unless one with the same dedupe key exists. Only ACTIVE
+	 * users get alerts (an invited or disabled person gets none). A new alert is also sent to
+	 * the person's phones (Web Push), after the commit.
 	 * @param scope {@link #COMPANY} or {@link #PRIVATE}
 	 * @return true if it was added
 	 */
 	@Transactional
 	public boolean add(UUID userId, String scope, String kind, String title, String body, String link,
 			String dedupeKey) {
-		return this.jdbc.update("INSERT INTO notifications (id, user_id, scope, kind, title, body, link, dedupe_key, "
-				+ "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (user_id, dedupe_key) DO NOTHING",
-				UUID.randomUUID(), userId, scope, kind, title, body, link, dedupeKey,
-				Timestamp.from(this.clock.instant())) > 0;
+		UUID id = UUID.randomUUID();
+		boolean added = this.jdbc.update("INSERT INTO notifications (id, user_id, scope, kind, title, body, link, "
+				+ "dedupe_key, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM users WHERE id = ? "
+				+ "AND status = 'ACTIVE') ON CONFLICT (user_id, dedupe_key) DO NOTHING",
+				id, userId, scope, kind, title, body, link, dedupeKey,
+				Timestamp.from(this.clock.instant()), userId) > 0;
+		if (added) {
+			this.push.alertAdded(userId, id, title, body, link);
+		}
+		return added;
 	}
 
 	/** Everyone in the company: all active users (owner and members). */

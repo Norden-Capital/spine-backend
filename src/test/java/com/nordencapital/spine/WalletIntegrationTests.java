@@ -273,6 +273,9 @@ class WalletIntegrationTests extends IntegrationTestBase {
 			.hasStatus(HttpStatus.CREATED);
 		assertError(a.post("/api/wallet/budgets", "{\"limit\":\"5\"}"), HttpStatus.CONFLICT,
 				"budget_exists");
+		// A budget counts spending: an income category makes no sense.
+		assertError(a.post("/api/wallet/budgets", "{\"limit\":\"5\",\"categoryId\":\"" + walletCategoryId(a, "Salary")
+				+ "\"}"), HttpStatus.BAD_REQUEST, "validation_error");
 
 		addWallet(a, "EXPENSE", "50.00", restaurants, "Dinner");
 		addWallet(a, "EXPENSE", "35.00", food, "Market");
@@ -343,6 +346,12 @@ class WalletIntegrationTests extends IntegrationTestBase {
 		assertThat(walletCount("Rent")).isEqualTo(1);
 		assertThat(alertKinds(a)).contains("RECURRING_CREATED");
 		assertThat(a.get("/api/wallet/transactions")).bodyJson().extractingPath("$.items[0].recurringId").isNotNull();
+
+		// Deleting it also removes the alert that links to it.
+		String tx = this.jdbc.queryForObject("SELECT id::text FROM wallet_transactions WHERE description = 'Rent'",
+				String.class);
+		assertThat(a.delete("/api/wallet/transactions/" + tx)).hasStatus(HttpStatus.NO_CONTENT);
+		assertThat(alertKinds(a)).doesNotContain("RECURRING_CREATED");
 	}
 
 	@Test

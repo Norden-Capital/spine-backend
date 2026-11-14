@@ -10,6 +10,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.test.web.servlet.assertj.MvcTestResult;
 
 import com.nordencapital.spine.IntegrationTestBase.Client;
+import com.nordencapital.spine.alert.AlertService;
 import com.nordencapital.spine.balance.BalanceService;
 import com.nordencapital.spine.user.Role;
 import com.nordencapital.spine.user.User;
@@ -27,6 +28,9 @@ class BalanceIntegrationTests extends IntegrationTestBase {
 
 	@Autowired
 	private BalanceService job;
+
+	@Autowired
+	private AlertService alertService;
 
 	@Test
 	void ownerChangesMembersOnlyRead() {
@@ -241,6 +245,33 @@ class BalanceIntegrationTests extends IntegrationTestBase {
 	}
 
 	/** Moves the start point (and the first cut) back in time. */
+	@Test
+	void alertsSkipInactivePeopleAndReachPeopleWhoJoinLater() {
+		User boss = activeUser("boss@example.com", Role.OWNER);
+		User emp = activeUser("emp@example.com", Role.MEMBER);
+		User gone = disabledUser("gone@example.com", Role.MEMBER);
+		User newbie = invitedUser("new@example.com", Role.MEMBER);
+		Client b = loggedIn("boss@example.com");
+
+		assertThat(b.post("/api/admin/balances", body("Twilio", "DAY", 1, null))).hasStatus(HttpStatus.CREATED);
+		assertThat(b.post("/api/admin/balances/" + id() + "/fix", "{\"amount\":\"0\"}")).hasStatusOk();
+		assertThat(alerts(boss, BalanceService.BALANCE_EMPTY)).isEqualTo(1);
+		assertThat(alerts(emp, BalanceService.BALANCE_EMPTY)).isEqualTo(1);
+		// Disabled and invited people get no alert, not even a private one.
+		assertThat(alerts(gone, BalanceService.BALANCE_EMPTY)).isZero();
+		assertThat(alerts(newbie, BalanceService.BALANCE_EMPTY)).isZero();
+		assertThat(this.alertService.add(gone.getId(), AlertService.BUDGET_80, "t", "b", null, "k")).isFalse();
+		assertThat(this.jdbc.queryForObject("SELECT count(*) FROM notifications WHERE user_id = ?", Integer.class,
+				gone.getId())).isZero();
+
+		// Someone who joins later gets the open company alerts at the next hourly run, once.
+		this.jdbc.update("UPDATE users SET status = 'ACTIVE' WHERE id = ?", newbie.getId());
+		this.job.runAlerts();
+		this.job.runAlerts();
+		assertThat(alerts(newbie, BalanceService.BALANCE_EMPTY)).isEqualTo(1);
+		assertThat(alerts(boss, BalanceService.BALANCE_EMPTY)).isEqualTo(1);
+	}
+
 	private void startedAgo(String name, int days, String amount) {
 		this.jdbc.update("UPDATE balances SET start_date = ?, anchor_date = ?, start_amount = ?::numeric WHERE name = ?",
 				TODAY.minusDays(days), TODAY.minusDays(days - 1), amount, name);

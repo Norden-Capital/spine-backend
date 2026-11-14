@@ -151,9 +151,16 @@ public class WalletBudgets {
 		}
 	}
 
+	/** No category (total budget), or one of my EXPENSE categories (a budget counts spending only). */
 	private void checkCategory(UUID userId, UUID categoryId) {
-		if (categoryId != null && this.categories.find(userId, categoryId).isEmpty()) {
-			throw new ApiException(HttpStatus.BAD_REQUEST, "validation_error", "categoryId: unknown category");
+		if (categoryId == null) {
+			return;
+		}
+		WalletCategories.Category category = this.categories.find(userId, categoryId)
+			.orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "validation_error", "categoryId: unknown category"));
+		if (!"EXPENSE".equals(category.kind())) {
+			throw new ApiException(HttpStatus.BAD_REQUEST, "validation_error",
+					"categoryId: a budget needs an expense category");
 		}
 	}
 

@@ -74,6 +74,12 @@ app:
     # Empty = emails are only printed to the console (local dev).
     resend-api-key: ${RESEND_API_KEY:}
     require-resend: false
+  push:
+    # Web Push (phone notifications). All three empty = push is off (the app still works).
+    # How to make the keys: docs/push-api.md. Never commit them.
+    vapid-public-key: ${SPINE_VAPID_PUBLIC_KEY:}
+    vapid-private-key: ${SPINE_VAPID_PRIVATE_KEY:}
+    vapid-subject: ${SPINE_VAPID_SUBJECT:}
   files:
     # Uploaded proof files. Local runs keep them in ./data/files (ignored by git).
     dir: ${APP_FILES_DIR:./data/files}

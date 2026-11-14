@@ -90,6 +90,7 @@ class CompanyRecurringIntegrationTests extends IntegrationTestBase {
 		assertThat(b.delete("/api/admin/recurring/" + id)).hasStatus(HttpStatus.NO_CONTENT);
 		assertThat(count("company_recurring_occurrences")).isZero();
 		assertThat(count("transactions")).isEqualTo(1);
+		assertThat(alerts(boss) + alerts(other) + alerts(emp)).isZero();
 	}
 
 	@Test

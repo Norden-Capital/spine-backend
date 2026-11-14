@@ -34,6 +34,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import com.nordencapital.spine.auth.AuthLimiters;
 import com.nordencapital.spine.mail.MailMessage;
 import com.nordencapital.spine.mail.MailSender;
+import com.nordencapital.spine.push.PushSender;
 import com.nordencapital.spine.user.Role;
 import com.nordencapital.spine.user.User;
 import com.nordencapital.spine.user.UserRepository;
@@ -43,12 +44,18 @@ import com.nordencapital.spine.user.UserStatus;
  * Full app + real Postgres (Testcontainers, needs Docker). Emails are captured instead of
  * sent. Each test starts with empty users, tokens and sessions.
  */
-@SpringBootTest(properties = { "app.bootstrap.admin-email=bootstrap@example.com", "app.files.dir=target/test-files" })
+@SpringBootTest(properties = { "app.bootstrap.admin-email=bootstrap@example.com", "app.files.dir=target/test-files",
+		// Throwaway VAPID test keys (push on), sent inline so tests can check right away.
+		"app.push.vapid-public-key=" + IntegrationTestBase.VAPID_PUBLIC,
+		"app.push.vapid-private-key=TIauvUc90BxBKI6-g_oOaXXiiMJRbVQ-iAggdytmj1k",
+		"app.push.vapid-subject=mailto:ops@example.com", "app.push.async=false" })
 @AutoConfigureMockMvc
-@Import({ TestcontainersConfiguration.class, IntegrationTestBase.MailCapture.class })
+@Import({ TestcontainersConfiguration.class, IntegrationTestBase.MailCapture.class, IntegrationTestBase.PushCapture.class })
 public abstract class IntegrationTestBase {
 
 	protected static final String PASSWORD = "correct-horse-battery";
+
+	protected static final String VAPID_PUBLIC = "BNsOjiQ6w_cTdiH7jnH2Bivg1BDg0NHOqiXzn3x62feA5Zp-b-NZM4lsBxqQ40RvY9ga-0hW9juDL18by0a-48k";
 
 	private static final Pattern TOKEN_IN_LINK = Pattern.compile("set-password\\?token=([A-Za-z0-9_-]+)");
 
@@ -73,6 +80,9 @@ public abstract class IntegrationTestBase {
 	@Autowired
 	protected CapturingMailSender mails;
 
+	@Autowired
+	protected CapturingPushSender pushes;
+
 	@BeforeEach
 	void cleanDatabase() throws IOException {
 		this.jdbc.update("DELETE FROM logos");
@@ -80,6 +90,7 @@ public abstract class IntegrationTestBase {
 		this.jdbc.update("DELETE FROM company_recurring_occurrences");
 		this.jdbc.update("DELETE FROM company_recurring");
 		this.jdbc.update("DELETE FROM notifications");
+		this.jdbc.update("DELETE FROM push_subscriptions");
 		this.jdbc.update("DELETE FROM wallet_goal_contributions");
 		this.jdbc.update("DELETE FROM wallet_goals");
 		this.jdbc.update("DELETE FROM wallet_budgets");
@@ -104,6 +115,7 @@ public abstract class IntegrationTestBase {
 		this.jdbc.update("DELETE FROM users");
 		this.limiters.clearAll();
 		this.mails.clear();
+		this.pushes.clear();
 	}
 
 	/**
@@ -231,6 +243,11 @@ public abstract class IntegrationTestBase {
 			return sendWithCsrf(this.mvc.delete().uri(uri));
 		}
 
+		/** DELETE with a JSON body. */
+		public MvcTestResult delete(String uri, String json) {
+			return sendWithCsrf(this.mvc.delete().uri(uri).contentType(MediaType.APPLICATION_JSON).content(json));
+		}
+
 		/** Uploads a file to POST /api/files (multipart, field "file"). */
 		public MvcTestResult upload(String name, String contentType, byte[] content) {
 			if (!this.cookies.containsKey("XSRF-TOKEN")) {
@@ -329,6 +346,48 @@ public abstract class IntegrationTestBase {
 		@Primary
 		CapturingMailSender capturingMailSender() {
 			return new CapturingMailSender();
+		}
+
+	}
+
+	/** Records pushes instead of sending them. Answer per endpoint: 201 unless set. */
+	public static final class CapturingPushSender implements PushSender {
+
+		private final List<Sent> sent = Collections.synchronizedList(new ArrayList<>());
+
+		private final Map<String, Integer> answers = new java.util.concurrent.ConcurrentHashMap<>();
+
+		@Override
+		public int send(Target target, byte[] payload) {
+			this.sent.add(new Sent(target.endpoint(), new String(payload, StandardCharsets.UTF_8)));
+			return this.answers.getOrDefault(target.endpoint(), 201);
+		}
+
+		public List<Sent> all() {
+			return List.copyOf(this.sent);
+		}
+
+		public void answer(String endpoint, int status) {
+			this.answers.put(endpoint, status);
+		}
+
+		public void clear() {
+			this.sent.clear();
+			this.answers.clear();
+		}
+
+		public record Sent(String endpoint, String payload) {
+		}
+
+	}
+
+	@TestConfiguration(proxyBeanMethods = false)
+	static class PushCapture {
+
+		@Bean
+		@Primary
+		CapturingPushSender capturingPushSender() {
+			return new CapturingPushSender();
 		}
 
 	}

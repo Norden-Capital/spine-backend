@@ -176,6 +176,9 @@ public class WalletTransactions {
 				+ "ON CONFLICT DO NOTHING", Timestamp.from(this.clock.instant()), id, user.getId());
 		this.fileService.deleteNow(this.files.findAllByWalletTransactionIdInOrderByCreatedAtAsc(List.of(id)));
 		this.jdbc.update("DELETE FROM wallet_transactions WHERE id = ? AND user_id = ?", id, user.getId());
+		// "Recurring item added" alert: its link would be dead.
+		this.jdbc.update("DELETE FROM notifications WHERE user_id = ? AND link = ?", user.getId(),
+				"/wallet/transactions/" + id);
 	}
 
 	/** INCOME - EXPENSE of all my transactions (USD). */
