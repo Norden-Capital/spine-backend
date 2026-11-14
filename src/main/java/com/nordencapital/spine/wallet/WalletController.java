@@ -274,6 +274,14 @@ public class WalletController {
 		return ResponseEntity.status(HttpStatus.CREATED).body(this.goals.create(me(actor, request).getId(), body));
 	}
 
+	@Operation(summary = "Reorder my goals", description = "Body: all my goal ids in the new order. Returns my goals "
+			+ "in that order. 400 validation_error if an id is missing, extra or repeated.")
+	@PutMapping("/api/wallet/goals/order")
+	public List<WalletGoals.Goal> reorderGoals(@AuthenticationPrincipal AuthUser actor,
+			@Valid @RequestBody WalletGoals.OrderRequest body, HttpServletRequest request) {
+		return this.goals.reorder(me(actor, request).getId(), body.ids());
+	}
+
 	@PutMapping("/api/wallet/goals/{id}")
 	public WalletGoals.Goal updateGoal(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody WalletGoals.GoalRequest body, HttpServletRequest request) {

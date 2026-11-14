@@ -329,6 +329,47 @@ class WalletIntegrationTests extends IntegrationTestBase {
 		assertThat(this.jdbc.queryForObject("SELECT count(*) FROM wallet_goal_contributions", Integer.class)).isZero();
 	}
 
+	@Test
+	void goalsCanBeReordered() {
+		activeUser("ada@example.com", Role.MEMBER);
+		activeUser("bob@example.com", Role.MEMBER);
+		Client a = wallet("ada@example.com");
+		a.post("/api/wallet/goals", "{\"name\":\"One\",\"target\":\"100\"}");
+		a.post("/api/wallet/goals", "{\"name\":\"Two\",\"target\":\"100\"}");
+		a.post("/api/wallet/goals", "{\"name\":\"Three\",\"target\":\"100\"}");
+		assertThat(a.get("/api/wallet/goals")).bodyJson().extractingPath("$[*].name")
+			.isEqualTo(List.of("One", "Two", "Three"));
+		String one = goalId("One");
+		String two = goalId("Two");
+		String three = goalId("Three");
+
+		MvcTestResult moved = a.put("/api/wallet/goals/order",
+				"{\"ids\":[\"" + three + "\",\"" + one + "\",\"" + two + "\"]}");
+		assertThat(moved).hasStatus(HttpStatus.OK).bodyJson().extractingPath("$[*].name")
+			.isEqualTo(List.of("Three", "One", "Two"));
+		assertThat(a.get("/api/wallet/goals")).bodyJson().extractingPath("$[*].name")
+			.isEqualTo(List.of("Three", "One", "Two"));
+		// A new goal goes last.
+		a.post("/api/wallet/goals", "{\"name\":\"Four\",\"target\":\"100\"}");
+		assertThat(a.get("/api/wallet/goals")).bodyJson().extractingPath("$[3].name").isEqualTo("Four");
+
+		// Missing, repeated or someone else's goal: 400.
+		assertError(a.put("/api/wallet/goals/order", "{\"ids\":[\"" + one + "\",\"" + two + "\"]}"),
+				HttpStatus.BAD_REQUEST, "validation_error");
+		String four = goalId("Four");
+		assertError(a.put("/api/wallet/goals/order",
+				"{\"ids\":[\"" + one + "\",\"" + one + "\",\"" + two + "\",\"" + four + "\"]}"),
+				HttpStatus.BAD_REQUEST, "validation_error");
+		Client b = wallet("bob@example.com");
+		assertError(b.put("/api/wallet/goals/order",
+				"{\"ids\":[\"" + one + "\",\"" + two + "\",\"" + three + "\",\"" + four + "\"]}"),
+				HttpStatus.BAD_REQUEST, "validation_error");
+	}
+
+	private String goalId(String name) {
+		return this.jdbc.queryForObject("SELECT id::text FROM wallet_goals WHERE name = ?", String.class, name);
+	}
+
 	// ---- recurring ----
 
 	@Test

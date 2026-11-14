@@ -43,11 +43,11 @@ public class WalletGoals {
 		this.clock = clock;
 	}
 
-	/** My goals, oldest first, each with its contributions (newest first). */
+	/** My goals in my order (drag and drop), then oldest first, each with its contributions (newest first). */
 	@Transactional(readOnly = true)
 	public List<Goal> list(UUID userId) {
 		List<Object[]> goals = this.jdbc.query(
-				"SELECT id, name, target, deadline FROM wallet_goals WHERE user_id = ? ORDER BY created_at, id",
+				"SELECT id, name, target, deadline FROM wallet_goals WHERE user_id = ? ORDER BY position, created_at, id",
 				(rs, row) -> new Object[] { rs.getObject("id", UUID.class), rs.getString("name"),
 						rs.getBigDecimal("target"),
 						(rs.getDate("deadline") != null) ? rs.getDate("deadline").toLocalDate() : null },
@@ -80,9 +80,11 @@ public class WalletGoals {
 		BigDecimal target = Money.parse("target", request.target());
 		UUID id = UUID.randomUUID();
 		Timestamp now = Timestamp.from(this.clock.instant());
-		this.jdbc.update("INSERT INTO wallet_goals (id, user_id, name, target, deadline, created_at, updated_at) "
-				+ "VALUES (?, ?, ?, ?, ?, ?, ?)", id, userId, request.name(), target,
-				date("deadline", request.deadline()), now, now);
+		// A new goal goes last.
+		this.jdbc.update("INSERT INTO wallet_goals (id, user_id, name, target, deadline, position, created_at, "
+				+ "updated_at) SELECT ?, ?, ?, ?, ?, coalesce(max(position) + 1, 0), ?, ? FROM wallet_goals "
+				+ "WHERE user_id = ?", id, userId, request.name(), target, date("deadline", request.deadline()), now,
+				now, userId);
 		return one(userId, id);
 	}
 
@@ -95,6 +97,25 @@ public class WalletGoals {
 				+ "WHERE id = ? AND user_id = ?", request.name(), target,
 				date("deadline", request.deadline()), Timestamp.from(this.clock.instant()), id, userId);
 		return one(userId, id);
+	}
+
+	/**
+	 * Saves my order of goals: {@code ids} must be all my goals, each once.
+	 * @return my goals in the new order
+	 * @throws ApiException 400 {@code validation_error} (missing, extra or repeated ids)
+	 */
+	@Transactional
+	public List<Goal> reorder(UUID userId, List<UUID> ids) {
+		List<UUID> mine = this.jdbc.queryForList("SELECT id FROM wallet_goals WHERE user_id = ? FOR UPDATE", UUID.class,
+				userId);
+		if (ids == null || ids.size() != mine.size() || new java.util.HashSet<>(ids).size() != ids.size()
+				|| !mine.containsAll(ids)) {
+			throw invalid("ids: must list each of your goals once");
+		}
+		for (int i = 0; i < ids.size(); i++) {
+			this.jdbc.update("UPDATE wallet_goals SET position = ? WHERE id = ? AND user_id = ?", i, ids.get(i), userId);
+		}
+		return list(userId);
 	}
 
 	/** Deletes the goal and its contributions. @throws ApiException 404 */
@@ -241,6 +262,10 @@ public class WalletGoals {
 			name = Names.clean(name);
 		}
 
+	}
+
+	/** @param ids all my goals, in the new order */
+	public record OrderRequest(@NotNull List<UUID> ids) {
 	}
 
 	public record ContributionRequest(@NotNull String amount,
