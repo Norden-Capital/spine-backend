@@ -88,9 +88,11 @@ public class WalletBudgets {
 		UUID id = UUID.randomUUID();
 		Timestamp now = Timestamp.from(this.clock.instant());
 		try {
-			this.jdbc.update("INSERT INTO wallet_budgets (id, user_id, amount, currency, category_id, created_at, "
-					+ "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", id, userId, limit, currency,
-					request.categoryId(), now, now);
+			// A new budget goes last.
+			this.jdbc.update("INSERT INTO wallet_budgets (id, user_id, amount, currency, category_id, position, "
+					+ "created_at, updated_at) SELECT ?, ?, ?, ?, ?, coalesce(max(position) + 1, 0), ?, ? "
+					+ "FROM wallet_budgets WHERE user_id = ?", id, userId, limit, currency, request.categoryId(), now,
+					now, userId);
 		}
 		catch (DuplicateKeyException ex) {
 			throw exists();
@@ -115,6 +117,31 @@ public class WalletBudgets {
 		}
 		checkAlerts(userId);
 		return one(userId, id);
+	}
+
+	/**
+	 * Saves my order of budgets: {@code ids} must be all my budgets, each once.
+	 * @return my budgets in the new order
+	 * @throws ApiException 400 {@code validation_error} (missing, extra or repeated ids)
+	 */
+	@Transactional
+	public List<Budget> reorder(UUID userId, List<UUID> ids) {
+		List<UUID> mine = this.jdbc.queryForList("SELECT id FROM wallet_budgets WHERE user_id = ? FOR UPDATE",
+				UUID.class, userId);
+		if (ids == null || ids.size() != mine.size() || new java.util.HashSet<>(ids).size() != ids.size()
+				|| !mine.containsAll(ids)) {
+			throw new ApiException(org.springframework.http.HttpStatus.BAD_REQUEST, "validation_error",
+					"ids: must list each of your budgets once");
+		}
+		for (int i = 0; i < ids.size(); i++) {
+			this.jdbc.update("UPDATE wallet_budgets SET position = ? WHERE id = ? AND user_id = ?", i, ids.get(i),
+					userId);
+		}
+		return list(userId);
+	}
+
+	/** @param ids all my budgets, in the new order */
+	public record OrderRequest(@jakarta.validation.constraints.NotNull List<UUID> ids) {
 	}
 
 	/** @throws ApiException 404 {@code budget_not_found} */
@@ -197,7 +224,7 @@ public class WalletBudgets {
 
 	private List<Row> rows(UUID userId) {
 		return this.jdbc.query(
-				"SELECT id, amount, currency, category_id FROM wallet_budgets WHERE user_id = ? ORDER BY created_at",
+				"SELECT id, amount, currency, category_id FROM wallet_budgets WHERE user_id = ? ORDER BY position, created_at, id",
 				(rs, row) -> new Row(rs.getObject("id", UUID.class), rs.getBigDecimal("amount"),
 						rs.getString("currency"), rs.getObject("category_id", UUID.class)),
 				userId);

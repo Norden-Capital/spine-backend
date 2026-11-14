@@ -259,6 +259,14 @@ public class WalletController {
 		return ResponseEntity.status(HttpStatus.CREATED).body(this.budgets.create(me(actor, request).getId(), body));
 	}
 
+	@Operation(summary = "Reorder my budgets", description = "Body: all my budget ids in the new order. Returns my "
+			+ "budgets in that order. 400 validation_error if an id is missing, extra or repeated.")
+	@PutMapping("/api/wallet/budgets/order")
+	public List<WalletBudgets.Budget> reorderBudgets(@AuthenticationPrincipal AuthUser actor,
+			@Valid @RequestBody WalletBudgets.OrderRequest body, HttpServletRequest request) {
+		return this.budgets.reorder(me(actor, request).getId(), body.ids());
+	}
+
 	@Operation(summary = "Change a budget", description = "currency left out = keep.")
 	@PutMapping("/api/wallet/budgets/{id}")
 	public WalletBudgets.Budget updateBudget(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,

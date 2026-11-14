@@ -366,6 +366,34 @@ class WalletIntegrationTests extends IntegrationTestBase {
 				HttpStatus.BAD_REQUEST, "validation_error");
 	}
 
+	@Test
+	void budgetsCanBeReordered() {
+		activeUser("ada@example.com", Role.MEMBER);
+		activeUser("bob@example.com", Role.MEMBER);
+		Client a = wallet("ada@example.com");
+		a.post("/api/wallet/budgets", "{\"limit\":\"100\"}");
+		String cat1 = this.jdbc.queryForObject("SELECT id::text FROM wallet_categories WHERE user_id = (SELECT id FROM "
+				+ "users WHERE email = 'ada@example.com') AND parent_id IS NULL AND kind = 'EXPENSE' ORDER BY position "
+				+ "LIMIT 1", String.class);
+		a.post("/api/wallet/budgets", "{\"limit\":\"50\",\"categoryId\":\"" + cat1 + "\"}");
+		String first = this.jdbc.queryForObject("SELECT id::text FROM wallet_budgets WHERE category_id IS NULL",
+				String.class);
+		String second = this.jdbc.queryForObject("SELECT id::text FROM wallet_budgets WHERE category_id IS NOT NULL",
+				String.class);
+		assertThat(a.get("/api/wallet/budgets")).bodyJson().extractingPath("$[0].id").isEqualTo(first);
+
+		MvcTestResult moved = a.put("/api/wallet/budgets/order",
+				"{\"ids\":[\"" + second + "\",\"" + first + "\"]}");
+		assertThat(moved).hasStatus(HttpStatus.OK).bodyJson().extractingPath("$[0].id").isEqualTo(second);
+		assertThat(a.get("/api/wallet/budgets")).bodyJson().extractingPath("$[1].id").isEqualTo(first);
+
+		assertError(a.put("/api/wallet/budgets/order", "{\"ids\":[\"" + first + "\"]}"), HttpStatus.BAD_REQUEST,
+				"validation_error");
+		Client b = wallet("bob@example.com");
+		assertError(b.put("/api/wallet/budgets/order", "{\"ids\":[\"" + second + "\",\"" + first + "\"]}"),
+				HttpStatus.BAD_REQUEST, "validation_error");
+	}
+
 	private String goalId(String name) {
 		return this.jdbc.queryForObject("SELECT id::text FROM wallet_goals WHERE name = ?", String.class, name);
 	}
