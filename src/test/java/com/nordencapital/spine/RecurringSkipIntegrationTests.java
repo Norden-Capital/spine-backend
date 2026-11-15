@@ -178,10 +178,11 @@ class RecurringSkipIntegrationTests extends IntegrationTestBase {
 				+ "\",\"description\":\"" + name + "\"," + repeatJson("WEEKLY") + ",\"startDate\":\"" + start + "\"}";
 	}
 
+	/** No early reminders: the dates here are about skips, not about reminding early. */
 	private String companyBody(String description, LocalDate start) {
 		String category = this.jdbc.queryForObject("SELECT id::text FROM categories WHERE name = 'Food'", String.class);
 		return "{\"type\":\"EXPENSE\",\"amount\":\"1200\",\"description\":\"" + description + "\",\"categoryId\":\""
-				+ category + "\"," + repeatJson("WEEKLY") + ",\"startDate\":\"" + start + "\"}";
+				+ category + "\"," + repeatJson("WEEKLY") + ",\"startDate\":\"" + start + "\",\"remindDays\":[]}";
 	}
 
 	private static String date(LocalDate date) {

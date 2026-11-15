@@ -9,10 +9,13 @@ import java.time.Clock;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -55,9 +58,11 @@ import com.nordencapital.spine.user.User;
 /**
  * Company repeat expenses. REMINDERS ONLY: nothing is created automatically (a company
  * transaction needs proof files). Each due date becomes one occurrence that stays DUE
- * (overdue after its date) until a transaction is saved from it (DONE, linked) or an
- * its creator or the OWNER skips it (SKIPPED). Everyone in the company gets an in-app alert on the due
- * day (in their own time zone). Everyone can see the list, add a repeat expense and save a transaction from a
+ * (overdue after its date) until a transaction is saved from it (DONE, linked) or
+ * its creator or the OWNER skips it (SKIPPED). Early reminders: each repeat has "remind days"
+ * (any of 7, 3, 1 days before; new ones 7 and 3). The occurrence is made on the earliest of these
+ * days (so it shows in "Due soon" and can be added early), and everyone in the company gets an
+ * in-app alert on each of these days and on the due day (in their own time zone). Everyone can see the list, add a repeat expense and save a transaction from a
  * reminder; only its creator or the OWNER changes it (like company transactions).
  */
 @Service
@@ -75,7 +80,25 @@ public class CompanyRecurring {
 	private static final ZoneId LATEST_ZONE = ZoneOffset.ofHours(14);
 
 	private static final String COLUMNS = "id, type, amount, description, category_id, website, repeat_unit, repeat_every, "
-			+ "start_date, end_date, next_date, paused, paused_until, created_by";
+			+ "start_date, end_date, next_date, paused, paused_until, created_by, remind_days";
+
+	/** The days before the due date that may be chosen for early alerts (biggest first). */
+	static final List<Integer> REMIND_CHOICES = List.of(7, 3, 1);
+
+	/** Remind days of new repeats (and of the ones that existed before early reminders). */
+	static final List<Integer> DEFAULT_REMIND_DAYS = List.of(7, 3);
+
+	/**
+	 * SQL: how many days before its due date the occurrence {@code o} shows (its repeat's
+	 * biggest remind day, 0 = only on the due day).
+	 */
+	private static final String LEAD = "(SELECT coalesce(max(d), 0) FROM company_recurring r, unnest(r.remind_days) d "
+			+ "WHERE r.id = o.recurring_id)";
+
+	/** Waiting reminders that show to someone whose today is the parameter. */
+	private static final String SHOWN_DUE = "o.status = 'DUE' AND o.due_date - " + LEAD + " <= ?";
+
+	private static final DateTimeFormatter ALERT_DATE = DateTimeFormatter.ofPattern("EEE d MMM", Locale.ENGLISH);
 
 	private static final Logger logger = LoggerFactory.getLogger(CompanyRecurring.class);
 
@@ -120,8 +143,8 @@ public class CompanyRecurring {
 		List<Row> rows = this.jdbc.query("SELECT " + COLUMNS + " FROM company_recurring "
 				+ "ORDER BY next_date NULLS LAST, description", CompanyRecurring::map);
 		Map<UUID, Integer> due = new HashMap<>();
-		this.jdbc.query("SELECT recurring_id, count(*) AS n FROM company_recurring_occurrences WHERE status = 'DUE' "
-				+ "AND due_date <= ? GROUP BY recurring_id", (rs) -> {
+		this.jdbc.query("SELECT o.recurring_id, count(*) AS n FROM company_recurring_occurrences o WHERE " + SHOWN_DUE
+				+ " GROUP BY o.recurring_id", (rs) -> {
 					due.put(rs.getObject("recurring_id", UUID.class), rs.getInt("n"));
 				}, Date.valueOf(today(user.getId())));
 		Views views = views(rows, today(user.getId()));
@@ -138,14 +161,14 @@ public class CompanyRecurring {
 	}
 
 	/**
-	 * Reminders still waiting: DUE occurrences whose date has come in my time zone,
-	 * oldest first.
+	 * Reminders still waiting: DUE occurrences whose date has come in my time zone, or will
+	 * come within the repeat's biggest remind day (early reminders), oldest date first.
 	 */
 	@Transactional(readOnly = true)
 	public List<Occurrence> due(AuthUser principal) {
 		User user = this.actors.active(principal);
 		LocalDate today = today(user.getId());
-		return occurrences("o.status = 'DUE' AND o.due_date <= ?", List.of(Date.valueOf(today)), today, user);
+		return occurrences(SHOWN_DUE, List.of(Date.valueOf(today)), today, user);
 	}
 
 	/**
@@ -189,22 +212,23 @@ public class CompanyRecurring {
 	public Recurring create(AuthUser principal, RecurringRequest request) {
 		User actor = this.actors.active(principal);
 		Valid valid = check(request, null);
+		List<Integer> remindDays = remindDays(request.remindDays(), DEFAULT_REMIND_DAYS);
 		UUID id = UUID.randomUUID();
 		Timestamp now = Timestamp.from(this.clock.instant());
 		this.jdbc.update("INSERT INTO company_recurring (id, type, amount, description, category_id, website, "
-				+ "repeat_unit, repeat_every, start_date, end_date, next_date, paused, created_by, created_at, updated_at) "
-				+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false, ?, ?, ?)", id, request.type(), valid.amount(),
-				request.description(), request.categoryId(), valid.website(), request.unit(), request.every(),
-				Date.valueOf(valid.start()), date(valid.end()), date(firstFrom(valid, today(actor.getId()))), actor.getId(),
-				now, now);
+				+ "repeat_unit, repeat_every, start_date, end_date, next_date, paused, created_by, created_at, updated_at, "
+				+ "remind_days) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false, ?, ?, ?, ?)", id, request.type(),
+				valid.amount(), request.description(), request.categoryId(), valid.website(), request.unit(),
+				request.every(), Date.valueOf(valid.start()), date(valid.end()),
+				date(firstFrom(valid, today(actor.getId()))), actor.getId(), now, now, remindDays.toArray(Integer[]::new));
 		this.logos.prefetch(valid.website());
 		runOne(id);
 		return one(id, actor);
 	}
 
 	/**
-	 * Full replace. The next reminder date is calculated again from my today; occurrences
-	 * already due stay as they are.
+	 * Full replace (but a missing {@code remindDays} keeps them). The next reminder date is
+	 * calculated again from my today; occurrences already made stay as they are.
 	 * @throws ApiException 404 {@code recurring_not_found}, 400 {@code validation_error}
 	 */
 	@Transactional
@@ -213,11 +237,13 @@ public class CompanyRecurring {
 		User actor = editable.actor();
 		Row row = editable.row();
 		Valid valid = check(request, row);
+		List<Integer> remindDays = remindDays(request.remindDays(), row.remindDays());
 		this.jdbc.update("UPDATE company_recurring SET type = ?, amount = ?, description = ?, "
 				+ "category_id = ?, website = ?, repeat_unit = ?, repeat_every = ?, start_date = ?, end_date = ?, next_date = ?, "
-				+ "updated_at = ? WHERE id = ?", request.type(), valid.amount(), request.description(),
+				+ "remind_days = ?, updated_at = ? WHERE id = ?", request.type(), valid.amount(), request.description(),
 				request.categoryId(), valid.website(), request.unit(), request.every(), Date.valueOf(valid.start()), date(valid.end()),
-				date(firstFrom(valid, from(row, actor))), Timestamp.from(this.clock.instant()), id);
+				date(firstFrom(valid, from(row, actor))), remindDays.toArray(Integer[]::new),
+				Timestamp.from(this.clock.instant()), id);
 		this.logos.prefetch(valid.website());
 		runOne(id);
 		return one(id, actor);
@@ -301,8 +327,8 @@ public class CompanyRecurring {
 	}
 
 	/**
-	 * Undo a skip, before its date. If the job already went past that date, the
-	 * reminder is made now.
+	 * Undo a skip, before its date. If the job already went past that date (its early
+	 * reminder day has come), the reminder is made now.
 	 * @throws ApiException 404 {@code recurring_not_found}, 409 {@code too_late}
 	 */
 	@Transactional
@@ -318,7 +344,7 @@ public class CompanyRecurring {
 				id, Date.valueOf(date));
 		boolean passed = row.nextDate() == null || row.nextDate().isAfter(date);
 		boolean inPause = row.paused() || (row.pausedUntil() != null && date.isBefore(row.pausedUntil()));
-		if (removed > 0 && passed && !inPause && !date.isAfter(latestToday())) {
+		if (removed > 0 && passed && !inPause && !date.minusDays(row.lead()).isAfter(latestToday())) {
 			this.jdbc.update("INSERT INTO company_recurring_occurrences (id, recurring_id, due_date, status, created_at) "
 					+ "VALUES (?, ?, ?, 'DUE', ?) ON CONFLICT (recurring_id, due_date) DO NOTHING", UUID.randomUUID(), id,
 					Date.valueOf(date), Timestamp.from(this.clock.instant()));
@@ -346,8 +372,8 @@ public class CompanyRecurring {
 	public void delete(AuthUser principal, UUID id) {
 		editable(principal, id);
 		// Its reminders go with it, so their alerts go too (their links would be dead).
-		this.jdbc.update("DELETE FROM notifications WHERE dedupe_key IN (SELECT 'company-recurring:' || id || ':due' "
-				+ "FROM company_recurring_occurrences WHERE recurring_id = ?)", id);
+		this.jdbc.update("DELETE FROM notifications n USING company_recurring_occurrences o WHERE o.recurring_id = ? "
+				+ "AND n.dedupe_key LIKE 'company-recurring:' || o.id || ':%'", id);
 		this.jdbc.update("DELETE FROM company_recurring WHERE id = ?", id);
 	}
 
@@ -390,14 +416,16 @@ public class CompanyRecurring {
 	// ---- the job ----
 
 	/**
-	 * Every hour: makes the occurrences whose date has come (nothing else is created),
-	 * then alerts everyone in the company once their day has reached a due date.
+	 * Every hour: makes the occurrences whose date (or first early reminder day) has come
+	 * (nothing else is created), then alerts everyone in the company on each remind day and
+	 * on the due day, in their own time zone.
 	 * @return how many occurrences were made
 	 */
 	@Scheduled(initialDelayString = "PT2M", fixedDelayString = "PT1H")
 	public int runDue() {
 		List<UUID> due = this.jdbc.queryForList(
-				"SELECT id FROM company_recurring WHERE NOT paused AND next_date IS NOT NULL AND next_date <= ?",
+				"SELECT id FROM company_recurring WHERE NOT paused AND next_date IS NOT NULL AND next_date - "
+						+ "coalesce((SELECT max(d) FROM unnest(remind_days) d), 0) <= ?",
 				UUID.class, Date.valueOf(latestToday()));
 		int made = 0;
 		for (UUID id : due) {
@@ -418,7 +446,10 @@ public class CompanyRecurring {
 		return made;
 	}
 
-	/** Makes the occurrences of one item up to today (latest zone). @return how many */
+	/**
+	 * Makes the occurrences of one item up to today (latest zone) plus its biggest remind day.
+	 * @return how many
+	 */
 	int runOne(UUID id) {
 		Row row = this.jdbc.query("SELECT " + COLUMNS + " FROM company_recurring WHERE id = ? FOR UPDATE",
 				CompanyRecurring::map, id).stream().findFirst().orElse(null);
@@ -429,7 +460,7 @@ public class CompanyRecurring {
 		LocalDate next = row.nextDate();
 		int made = 0;
 		java.util.Set<LocalDate> skipped = skips(id);
-		for (int i = 0; i < MAX_CATCH_UP && next != null && !next.isAfter(latest); i++) {
+		for (int i = 0; i < MAX_CATCH_UP && next != null && !next.minusDays(row.lead()).isAfter(latest); i++) {
 			made += skipped.contains(next) ? 0 : this.jdbc.update("INSERT INTO company_recurring_occurrences (id, recurring_id, due_date, status, "
 					+ "created_at) VALUES (?, ?, ?, 'DUE', ?) ON CONFLICT (recurring_id, due_date) DO NOTHING",
 					UUID.randomUUID(), id, Date.valueOf(next), Timestamp.from(this.clock.instant()));
@@ -447,22 +478,41 @@ public class CompanyRecurring {
 		return made;
 	}
 
-	/** One COMPANY alert per DUE occurrence for everyone in the company, once their day has come. */
+	/**
+	 * COMPANY alerts for everyone in the company, per DUE occurrence: one on each remind day
+	 * before its date (exactly N days before, in their time zone) and one once its day has come.
+	 * A DONE or SKIPPED occurrence gets no more alerts.
+	 */
 	void sendAlerts() {
 		List<UUID> managers = this.alerts.companyUsers();
 		if (managers.isEmpty()) {
 			return;
 		}
-		List<Occurrence> due = occurrences("o.status = 'DUE' AND o.due_date <= ?", List.of(Date.valueOf(latestToday())),
-				latestToday(), null);
+		List<Occurrence> due = occurrences(SHOWN_DUE, List.of(Date.valueOf(latestToday())), latestToday(), null);
+		if (due.isEmpty()) {
+			return;
+		}
+		Map<UUID, List<Integer>> remindDays = new HashMap<>();
+		this.jdbc.query("SELECT " + COLUMNS + " FROM company_recurring WHERE id = ANY (?)", CompanyRecurring::map,
+				(Object) due.stream().map(Occurrence::recurringId).distinct().toArray(UUID[]::new))
+			.forEach((row) -> remindDays.put(row.id(), row.remindDays()));
 		for (UUID manager : managers) {
 			LocalDate today = today(manager);
 			for (Occurrence occurrence : due) {
+				String link = "/recurring/due/" + occurrence.id();
 				if (!occurrence.dueDate().isAfter(today)) {
 					this.alerts.add(manager, AlertService.COMPANY, ALERT_KIND, title(occurrence.description()),
 							"$" + occurrence.amount() + " · due " + occurrence.dueDate()
 									+ ". Tap to add it with its proof.",
-							"/recurring/due/" + occurrence.id(), alertKey(occurrence.id()));
+							link, alertKey(occurrence.id()));
+					continue;
+				}
+				int days = (int) ChronoUnit.DAYS.between(today, occurrence.dueDate());
+				if (remindDays.getOrDefault(occurrence.recurringId(), List.of()).contains(days)) {
+					this.alerts.add(manager, AlertService.COMPANY, ALERT_KIND, earlyTitle(occurrence.description(), days),
+							"$" + occurrence.amount() + " on " + ALERT_DATE.format(occurrence.dueDate())
+									+ ". Tap to add it.",
+							link, earlyAlertKey(occurrence.id(), days));
 				}
 			}
 		}
@@ -471,7 +521,14 @@ public class CompanyRecurring {
 	// ---- helpers ----
 
 	private static String title(String description) {
-		String title = description + " is due";
+		return shorten(description + " is due");
+	}
+
+	private static String earlyTitle(String description, int days) {
+		return shorten(description + ((days == 1) ? " is due tomorrow" : " is due in " + days + " days"));
+	}
+
+	private static String shorten(String title) {
 		return (title.length() > 120) ? title.substring(0, 117) + "..." : title;
 	}
 
@@ -479,10 +536,31 @@ public class CompanyRecurring {
 		return "company-recurring:" + occurrenceId + ":due";
 	}
 
-	/** The reminder is handled: its alerts are marked read for everyone. */
+	/** One per occurrence and remind day (same prefix as {@link #alertKey}). */
+	private static String earlyAlertKey(UUID occurrenceId, int days) {
+		return "company-recurring:" + occurrenceId + ":before:" + days;
+	}
+
+	/** The reminder is handled: all its alerts (early ones too) are marked read for everyone. */
 	private void markAlertsRead(UUID occurrenceId) {
-		this.jdbc.update("UPDATE notifications SET read_at = coalesce(read_at, ?) WHERE dedupe_key = ?",
-				Timestamp.from(this.clock.instant()), alertKey(occurrenceId));
+		this.jdbc.update("UPDATE notifications SET read_at = coalesce(read_at, ?) WHERE dedupe_key LIKE ?",
+				Timestamp.from(this.clock.instant()), "company-recurring:" + occurrenceId + ":%");
+	}
+
+	/**
+	 * The remind days asked for, biggest first without repeats; null = {@code fallback}.
+	 * @throws ApiException 400 {@code validation_error} (a value other than 7, 3 or 1)
+	 */
+	static List<Integer> remindDays(List<Integer> asked, List<Integer> fallback) {
+		if (asked == null) {
+			return fallback;
+		}
+		for (Integer day : asked) {
+			if (day == null || !REMIND_CHOICES.contains(day)) {
+				throw invalid("remindDays: each must be 7, 3 or 1");
+			}
+		}
+		return REMIND_CHOICES.stream().filter(asked::contains).toList();
 	}
 
 	private void lockDue(UUID occurrenceId) {
@@ -556,12 +634,11 @@ public class CompanyRecurring {
 					"Repeat expense not found"));
 	}
 
-	/** dueCount = the same reminders GET /api/recurring/due shows to this user (date reached in their zone). */
+	/** dueCount = the same reminders GET /api/recurring/due shows to this user (early ones too). */
 	private Recurring one(UUID id, User viewer) {
 		Row row = row(id);
-		Integer due = this.jdbc.queryForObject("SELECT count(*) FROM company_recurring_occurrences WHERE "
-				+ "recurring_id = ? AND status = 'DUE' AND due_date <= ?", Integer.class, id,
-				Date.valueOf(today(viewer.getId())));
+		Integer due = this.jdbc.queryForObject("SELECT count(*) FROM company_recurring_occurrences o WHERE "
+				+ "o.recurring_id = ? AND " + SHOWN_DUE, Integer.class, id, Date.valueOf(today(viewer.getId())));
 		return views(List.of(row), today(viewer.getId())).recurring(row, (due != null) ? due : 0,
 				canEdit(row, viewer));
 	}
@@ -638,7 +715,15 @@ public class CompanyRecurring {
 				(end != null) ? end.toLocalDate() : null, (next != null) ? next.toLocalDate() : null,
 				rs.getBoolean("paused"),
 				(rs.getDate("paused_until") != null) ? rs.getDate("paused_until").toLocalDate() : null,
-				rs.getObject("created_by", UUID.class));
+				rs.getObject("created_by", UUID.class), remindDays(rs.getArray("remind_days")));
+	}
+
+	private static List<Integer> remindDays(java.sql.Array array) throws SQLException {
+		List<Integer> days = new ArrayList<>();
+		for (Object day : (Object[]) array.getArray()) {
+			days.add(((Number) day).intValue());
+		}
+		return REMIND_CHOICES.stream().filter(days::contains).toList();
 	}
 
 	private record Views(Map<UUID, Category> categories, Map<String, List<String>> logoUrls,
@@ -676,7 +761,7 @@ public class CompanyRecurring {
 				.toList();
 			return new Recurring(row.id(), row.type(), Totals.money(row.amount()), row.description(),
 					category(row), row.website(), logoUrls(row), row.unit(), row.every(), row.startDate(), row.endDate(),
-					nextDate, row.paused(), pausedUntil, dueCount, upcoming, canEdit);
+					nextDate, row.paused(), pausedUntil, dueCount, upcoming, row.remindDays(), canEdit);
 		}
 
 	}
@@ -695,7 +780,13 @@ public class CompanyRecurring {
 
 	private record Row(UUID id, String type, BigDecimal amount, String description, UUID categoryId,
 			String website, String unit, int every, LocalDate startDate, LocalDate endDate, LocalDate nextDate,
-			boolean paused, LocalDate pausedUntil, UUID createdBy) {
+			boolean paused, LocalDate pausedUntil, UUID createdBy, List<Integer> remindDays) {
+
+		/** How many days before its date an occurrence is made (0 = on the day). */
+		int lead() {
+			return this.remindDays.isEmpty() ? 0 : this.remindDays.get(0);
+		}
+
 	}
 
 	private record OccurrenceRow(UUID id, UUID recurringId, LocalDate dueDate, String status, UUID transactionId) {
@@ -708,22 +799,24 @@ public class CompanyRecurring {
 	 * @param nextDate the next reminder date, skipped dates left out (null = finished after endDate)
 	 * @param paused true = paused with no end (Resume to go on)
 	 * @param pausedUntil paused until this date (then it goes on by itself), or null
-	 * @param dueCount reminders waiting for me: DUE and their date has come in my time zone (same
-	 * as GET /api/recurring/due)
+	 * @param dueCount reminders waiting for me: DUE and their date (or their first early reminder
+	 * day) has come in my time zone (same as GET /api/recurring/due)
 	 * @param upcoming the next 6 dates from my today: UPCOMING, SKIPPED, PAUSED, or the reminder
 	 * status DUE / DONE / SKIPPED once it exists
+	 * @param remindDays early alerts: days before the date (7, 3, 1; biggest first; empty = only
+	 * on the due day)
 	 * @param canEdit true when I may change, pause, skip or delete it (its creator or the OWNER)
 	 */
 	public record Recurring(UUID id, String type, String amount, String description,
 			CategoryRef category, String website, List<String> logoUrls, String unit, int every, LocalDate startDate,
 			LocalDate endDate, LocalDate nextDate, boolean paused, LocalDate pausedUntil, int dueCount,
-			List<Recurrence.Upcoming> upcoming, boolean canEdit) {
+			List<Recurrence.Upcoming> upcoming, List<Integer> remindDays, boolean canEdit) {
 	}
 
 	/**
 	 * One reminder, with the values to pre-fill the new transaction.
 	 * @param status DUE, DONE or SKIPPED
-	 * @param overdue DUE and its date is before my today
+	 * @param overdue DUE and its date is before my today (an early reminder is not overdue)
 	 * @param transactionId the transaction saved from it (DONE), else null
 	 * @param canEdit true when I may skip it (its repeat's creator or the OWNER)
 	 */
@@ -747,7 +840,10 @@ public class CompanyRecurring {
 			@NotNull @Pattern(regexp = "[0-9]{4}-[0-9]{2}-[0-9]{2}", message = "must be like 2026-03-31")
 			String startDate,
 			@Schema(nullable = true, description = "Optional last date (included)")
-			@Pattern(regexp = "[0-9]{4}-[0-9]{2}-[0-9]{2}", message = "must be like 2026-03-31") String endDate) {
+			@Pattern(regexp = "[0-9]{4}-[0-9]{2}-[0-9]{2}", message = "must be like 2026-03-31") String endDate,
+			@Schema(nullable = true, description = "Early alerts: days before the date, any of 7, 3, 1 (empty = only "
+					+ "on the due day). Missing: [7, 3] on create, unchanged on update", example = "[7, 3]")
+			List<Integer> remindDays) {
 
 		public RecurringRequest {
 			description = (description != null) ? description.strip() : null;
