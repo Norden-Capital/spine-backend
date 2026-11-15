@@ -211,15 +211,13 @@ class CompanyRecurringIntegrationTests extends IntegrationTestBase {
 		String boss = this.jdbc.queryForObject("SELECT id::text FROM company_recurring WHERE description = 'Rent'",
 				String.class);
 
-		// canEdit: the creator and the owner; another member sees false.
+		// canEdit: everyone in the company, on every repeat.
 		assertThat(e.get("/api/recurring/" + mine)).bodyJson().extractingPath("$.canEdit").isEqualTo(true);
-		assertThat(e.get("/api/recurring/" + boss)).bodyJson().extractingPath("$.canEdit").isEqualTo(false);
-		assertThat(o.get("/api/recurring/" + mine)).bodyJson().extractingPath("$.canEdit").isEqualTo(false);
+		assertThat(e.get("/api/recurring/" + boss)).bodyJson().extractingPath("$.canEdit").isEqualTo(true);
+		assertThat(o.get("/api/recurring/" + mine)).bodyJson().extractingPath("$.canEdit").isEqualTo(true);
 		assertThat(b.get("/api/recurring/" + mine)).bodyJson().extractingPath("$.canEdit").isEqualTo(true);
-		assertThat(b.get("/api/recurring")).bodyJson().extractingPath("$[0].canEdit").isEqualTo(true);
-		assertThat(o.get("/api/recurring")).bodyJson().extractingPath("$[0].canEdit").isEqualTo(false);
 
-		// The member changes, pauses, resumes and skips a date of their own.
+		// A member changes, pauses, resumes and skips a date of their own.
 		MvcTestResult changed = e.put("/api/recurring/" + mine, body("Coffee beans", "MONTHLY", TODAY.plusDays(3), null));
 		assertThat(changed).hasStatus(HttpStatus.OK);
 		assertThat(changed).bodyJson().extractingPath("$.description").isEqualTo("Coffee beans");
@@ -230,21 +228,16 @@ class CompanyRecurringIntegrationTests extends IntegrationTestBase {
 			.hasStatus(HttpStatus.OK);
 		assertThat(e.delete("/api/recurring/" + mine + "/skips/" + TODAY.plusDays(3))).hasStatus(HttpStatus.OK);
 
-		// Not the owner's, and not another member's.
-		String rent = body("Rent", "MONTHLY", TODAY.plusDays(5), null);
-		assertThat(e.put("/api/recurring/" + boss, rent)).hasStatus(HttpStatus.FORBIDDEN);
-		assertThat(e.put("/api/recurring/" + boss, rent)).bodyJson().extractingPath("$.error").isEqualTo("forbidden");
-		assertThat(e.post("/api/recurring/" + boss + "/pause", "")).hasStatus(HttpStatus.FORBIDDEN);
-		assertThat(e.post("/api/recurring/" + boss + "/pause-until", "{\"date\":\"" + TODAY.plusDays(9) + "\"}"))
-			.hasStatus(HttpStatus.FORBIDDEN);
-		assertThat(e.post("/api/recurring/" + boss + "/skips", "{\"date\":\"" + TODAY.plusDays(5) + "\"}"))
-			.hasStatus(HttpStatus.FORBIDDEN);
-		assertThat(e.delete("/api/recurring/" + boss)).hasStatus(HttpStatus.FORBIDDEN);
-		assertThat(o.put("/api/recurring/" + mine, body("Mine now", "MONTHLY", TODAY, null)))
-			.hasStatus(HttpStatus.FORBIDDEN);
-		assertThat(o.delete("/api/recurring/" + mine)).hasStatus(HttpStatus.FORBIDDEN);
+		// ...and also the owner's one and another member's one.
+		assertThat(e.put("/api/recurring/" + boss, noEarly(body("Rent (office)", "MONTHLY", TODAY.plusDays(5), null))))
+			.bodyJson().extractingPath("$.description").isEqualTo("Rent (office)");
+		assertThat(e.post("/api/recurring/" + boss + "/pause", "")).bodyJson().extractingPath("$.paused").isEqualTo(true);
+		assertThat(e.post("/api/recurring/" + boss + "/resume", "")).bodyJson().extractingPath("$.paused")
+			.isEqualTo(false);
+		assertThat(o.put("/api/recurring/" + mine, noEarly(body("Coffee", "MONTHLY", TODAY.plusDays(3), null))))
+			.hasStatus(HttpStatus.OK);
 
-		// "Skip this time": the repeat's creator or the owner.
+		// "Skip this time": everyone.
 		this.jdbc.update("INSERT INTO company_recurring_occurrences (id, recurring_id, due_date, status, created_at) "
 				+ "VALUES (gen_random_uuid(), ?::uuid, ?, 'DUE', now())", mine, java.sql.Date.valueOf(TODAY));
 		this.jdbc.update("INSERT INTO company_recurring_occurrences (id, recurring_id, due_date, status, created_at) "
@@ -253,15 +246,10 @@ class CompanyRecurringIntegrationTests extends IntegrationTestBase {
 				"SELECT id::text FROM company_recurring_occurrences WHERE recurring_id = ?::uuid", String.class, mine);
 		String bossDue = this.jdbc.queryForObject(
 				"SELECT id::text FROM company_recurring_occurrences WHERE recurring_id = ?::uuid", String.class, boss);
-		assertThat(e.get("/api/recurring/occurrences/" + mineDue)).bodyJson().extractingPath("$.canEdit").isEqualTo(true);
-		assertThat(o.get("/api/recurring/occurrences/" + mineDue)).bodyJson().extractingPath("$.canEdit")
-			.isEqualTo(false);
-		assertThat(b.get("/api/recurring/occurrences/" + mineDue)).bodyJson().extractingPath("$.canEdit").isEqualTo(true);
-		assertThat(e.get("/api/recurring/occurrences/" + bossDue)).bodyJson().extractingPath("$.canEdit")
-			.isEqualTo(false);
-		assertThat(o.post("/api/recurring/occurrences/" + mineDue + "/skip", "")).hasStatus(HttpStatus.FORBIDDEN);
-		assertThat(e.post("/api/recurring/occurrences/" + bossDue + "/skip", "")).hasStatus(HttpStatus.FORBIDDEN);
-		assertThat(e.post("/api/recurring/occurrences/" + mineDue + "/skip", "")).bodyJson().extractingPath("$.status")
+		assertThat(o.get("/api/recurring/occurrences/" + mineDue)).bodyJson().extractingPath("$.canEdit").isEqualTo(true);
+		assertThat(e.post("/api/recurring/occurrences/" + bossDue + "/skip", "")).bodyJson().extractingPath("$.status")
+			.isEqualTo("SKIPPED");
+		assertThat(o.post("/api/recurring/occurrences/" + mineDue + "/skip", "")).bodyJson().extractingPath("$.status")
 			.isEqualTo("SKIPPED");
 
 		// The owner manages the member's one, by the new path and by the old admin path.

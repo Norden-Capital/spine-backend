@@ -63,7 +63,7 @@ import com.nordencapital.spine.user.User;
  * (any of 7, 3, 1 days before; new ones 7 and 3). The occurrence is made on the earliest of these
  * days (so it shows in "Due soon" and can be added early), and everyone in the company gets an
  * in-app alert on each of these days and on the due day (in their own time zone). Everyone can see the list, add a repeat expense and save a transaction from a
- * reminder; only its creator or the OWNER changes it (like company transactions).
+ * reminder, and change any repeat (user decision 2026-11-15).
  */
 @Service
 public class CompanyRecurring {
@@ -183,11 +183,12 @@ public class CompanyRecurring {
 			.orElseThrow(CompanyRecurring::occurrenceNotFound);
 	}
 
-	// ---- changes (anyone adds; its creator or the OWNER changes) ----
+	// ---- changes (everyone in the company adds and changes any repeat; user decision 2026-11-15) ----
 
-	/** Its creator or the OWNER. */
+	/** Every ACTIVE person may change, pause, skip or delete any repeat (callers are already ACTIVE). */
+	@SuppressWarnings("unused")
 	private static boolean canEdit(Row row, User user) {
-		return user.getRole() == Role.OWNER || user.getId().equals(row.createdBy());
+		return user != null;
 	}
 
 	/**
@@ -805,7 +806,7 @@ public class CompanyRecurring {
 	 * status DUE / DONE / SKIPPED once it exists
 	 * @param remindDays early alerts: days before the date (7, 3, 1; biggest first; empty = only
 	 * on the due day)
-	 * @param canEdit true when I may change, pause, skip or delete it (its creator or the OWNER)
+	 * @param canEdit true when I may change, pause, skip or delete it (everyone in the company)
 	 */
 	public record Recurring(UUID id, String type, String amount, String description,
 			CategoryRef category, String website, List<String> logoUrls, String unit, int every, LocalDate startDate,
@@ -818,7 +819,7 @@ public class CompanyRecurring {
 	 * @param status DUE, DONE or SKIPPED
 	 * @param overdue DUE and its date is before my today (an early reminder is not overdue)
 	 * @param transactionId the transaction saved from it (DONE), else null
-	 * @param canEdit true when I may skip it (its repeat's creator or the OWNER)
+	 * @param canEdit true when I may skip it (everyone in the company)
 	 */
 	public record Occurrence(UUID id, UUID recurringId, LocalDate dueDate, String status, boolean overdue,
 			UUID transactionId, String type, String amount, String description, CategoryRef category,
