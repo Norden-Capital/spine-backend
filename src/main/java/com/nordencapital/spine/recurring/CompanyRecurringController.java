@@ -25,7 +25,8 @@ import com.nordencapital.spine.auth.AuthUser;
 import com.nordencapital.spine.common.ApiError;
 
 @Tag(name = "Repeat expenses", description = "Company repeat expenses: REMINDERS ONLY, nothing is created "
-		+ "automatically. Everyone reads; /api/admin/recurring is for the OWNER.")
+		+ "automatically. Everyone reads and adds; only its creator or the OWNER changes one (403 forbidden). "
+		+ "The old /api/admin/recurring paths still work for the OWNER.")
 @RestController
 public class CompanyRecurringController {
 
@@ -69,34 +70,37 @@ public class CompanyRecurringController {
 	@ApiResponse(responseCode = "201", description = "Created")
 	@ApiResponse(responseCode = "400", description = "validation_error",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
-	@PostMapping("/api/admin/recurring")
+	@PostMapping({ "/api/recurring", "/api/admin/recurring" })
 	public ResponseEntity<CompanyRecurring.Recurring> create(@AuthenticationPrincipal AuthUser actor,
 			@Valid @RequestBody CompanyRecurring.RecurringRequest body) {
 		return ResponseEntity.status(HttpStatus.CREATED).body(this.service.create(actor, body));
 	}
 
-	@Operation(summary = "Change a repeat expense", description = "Full replace. Reminders already due stay.")
-	@PutMapping("/api/admin/recurring/{id}")
+	@Operation(summary = "Change a repeat expense", description = "Full replace. Reminders already due stay. "
+			+ "Pause, resume, pause-until, skips, delete and \"skip this time\": its creator or the OWNER.")
+	@ApiResponse(responseCode = "403", description = "forbidden (not its creator, not the OWNER)",
+			content = @Content(schema = @Schema(implementation = ApiError.class)))
+	@PutMapping({ "/api/recurring/{id}", "/api/admin/recurring/{id}" })
 	public CompanyRecurring.Recurring update(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody CompanyRecurring.RecurringRequest body) {
 		return this.service.update(actor, id, body);
 	}
 
 	@Operation(summary = "Pause (no new reminders)")
-	@PostMapping("/api/admin/recurring/{id}/pause")
+	@PostMapping({ "/api/recurring/{id}/pause", "/api/admin/recurring/{id}/pause" })
 	public CompanyRecurring.Recurring pause(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id) {
 		return this.service.setPaused(actor, id, true);
 	}
 
 	@Operation(summary = "Resume", description = "Dates missed while paused are not reminded.")
-	@PostMapping("/api/admin/recurring/{id}/resume")
+	@PostMapping({ "/api/recurring/{id}/resume", "/api/admin/recurring/{id}/resume" })
 	public CompanyRecurring.Recurring resume(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id) {
 		return this.service.setPaused(actor, id, false);
 	}
 
 	@Operation(summary = "Delete a repeat expense", description = "Its reminders go too; saved transactions stay.")
 	@ApiResponse(responseCode = "204", description = "Deleted")
-	@DeleteMapping("/api/admin/recurring/{id}")
+	@DeleteMapping({ "/api/recurring/{id}", "/api/admin/recurring/{id}" })
 	public ResponseEntity<Void> delete(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id) {
 		this.service.delete(actor, id);
 		return ResponseEntity.noContent().build();
@@ -104,7 +108,7 @@ public class CompanyRecurringController {
 
 	@Operation(summary = "Pause until a date", description = "No reminder before that date; then it goes on by "
 			+ "itself. Resume ends it early. Body: {\"date\": \"2026-12-01\"} (after today).")
-	@PostMapping("/api/admin/recurring/{id}/pause-until")
+	@PostMapping({ "/api/recurring/{id}/pause-until", "/api/admin/recurring/{id}/pause-until" })
 	public CompanyRecurring.Recurring pauseUntil(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody com.nordencapital.spine.common.Recurrence.DateRequest body) {
 		return this.service.pauseUntil(actor, id, body.date());
@@ -113,14 +117,14 @@ public class CompanyRecurringController {
 	@Operation(summary = "Skip a future date", description = "No reminder for that date; the next ones are normal. "
 			+ "Body: {\"date\": \"2026-12-01\"} (a date of the series, today or later). 409 occurrence_exists when "
 			+ "the reminder is already there (use Skip this time on it).")
-	@PostMapping("/api/admin/recurring/{id}/skips")
+	@PostMapping({ "/api/recurring/{id}/skips", "/api/admin/recurring/{id}/skips" })
 	public CompanyRecurring.Recurring skipDate(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody com.nordencapital.spine.common.Recurrence.DateRequest body) {
 		return this.service.skip(actor, id, body.date());
 	}
 
 	@Operation(summary = "Undo a skip", description = "Only before its date (409 too_late).")
-	@DeleteMapping("/api/admin/recurring/{id}/skips/{date}")
+	@DeleteMapping({ "/api/recurring/{id}/skips/{date}", "/api/admin/recurring/{id}/skips/{date}" })
 	public CompanyRecurring.Recurring unskipDate(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@PathVariable String date) {
 		return this.service.unskip(actor, id, date);
@@ -129,7 +133,7 @@ public class CompanyRecurringController {
 	@Operation(summary = "Skip this time", description = "Closes a DUE reminder without a transaction.")
 	@ApiResponse(responseCode = "409", description = "occurrence_not_due",
 			content = @Content(schema = @Schema(implementation = ApiError.class)))
-	@PostMapping("/api/admin/recurring/occurrences/{id}/skip")
+	@PostMapping({ "/api/recurring/occurrences/{id}/skip", "/api/admin/recurring/occurrences/{id}/skip" })
 	public CompanyRecurring.Occurrence skip(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id) {
 		return this.service.skip(actor, id);
 	}

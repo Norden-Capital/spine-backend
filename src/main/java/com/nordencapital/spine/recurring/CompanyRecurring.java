@@ -49,14 +49,16 @@ import com.nordencapital.spine.logo.LogoService;
 import com.nordencapital.spine.me.UserZones;
 import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
 import com.nordencapital.spine.user.Actors;
+import com.nordencapital.spine.user.Role;
 import com.nordencapital.spine.user.User;
 
 /**
  * Company repeat expenses. REMINDERS ONLY: nothing is created automatically (a company
  * transaction needs proof files). Each due date becomes one occurrence that stays DUE
  * (overdue after its date) until a transaction is saved from it (DONE, linked) or an
- * the OWNER skips it (SKIPPED). Everyone in the company gets an in-app alert on the due day
- * (in their own time zone). Everyone can see the list and save a transaction from a reminder; only the OWNER changes it.
+ * its creator or the OWNER skips it (SKIPPED). Everyone in the company gets an in-app alert on the due
+ * day (in their own time zone). Everyone can see the list, add a repeat expense and save a transaction from a
+ * reminder; only its creator or the OWNER changes it (like company transactions).
  */
 @Service
 public class CompanyRecurring {
@@ -73,7 +75,7 @@ public class CompanyRecurring {
 	private static final ZoneId LATEST_ZONE = ZoneOffset.ofHours(14);
 
 	private static final String COLUMNS = "id, type, amount, description, category_id, website, repeat_unit, repeat_every, "
-			+ "start_date, end_date, next_date, paused, paused_until";
+			+ "start_date, end_date, next_date, paused, paused_until, created_by";
 
 	private static final Logger logger = LoggerFactory.getLogger(CompanyRecurring.class);
 
@@ -123,7 +125,9 @@ public class CompanyRecurring {
 					due.put(rs.getObject("recurring_id", UUID.class), rs.getInt("n"));
 				}, Date.valueOf(today(user.getId())));
 		Views views = views(rows, today(user.getId()));
-		return rows.stream().map((row) -> views.recurring(row, due.getOrDefault(row.id(), 0))).toList();
+		return rows.stream()
+			.map((row) -> views.recurring(row, due.getOrDefault(row.id(), 0), canEdit(row, user)))
+			.toList();
 	}
 
 	/** @throws ApiException 404 {@code recurring_not_found} */
@@ -141,7 +145,7 @@ public class CompanyRecurring {
 	public List<Occurrence> due(AuthUser principal) {
 		User user = this.actors.active(principal);
 		LocalDate today = today(user.getId());
-		return occurrences("o.status = 'DUE' AND o.due_date <= ?", List.of(Date.valueOf(today)), today);
+		return occurrences("o.status = 'DUE' AND o.due_date <= ?", List.of(Date.valueOf(today)), today, user);
 	}
 
 	/**
@@ -151,17 +155,39 @@ public class CompanyRecurring {
 	@Transactional(readOnly = true)
 	public Occurrence occurrence(AuthUser principal, UUID id) {
 		User user = this.actors.active(principal);
-		return occurrences("o.id = ?", List.of(id), today(user.getId())).stream()
+		return occurrences("o.id = ?", List.of(id), today(user.getId()), user).stream()
 			.findFirst()
 			.orElseThrow(CompanyRecurring::occurrenceNotFound);
 	}
 
-	// ---- changes (OWNER) ----
+	// ---- changes (anyone adds; its creator or the OWNER changes) ----
 
-	/** @throws ApiException 400 {@code validation_error} */
+	/** Its creator or the OWNER. */
+	private static boolean canEdit(Row row, User user) {
+		return user.getRole() == Role.OWNER || user.getId().equals(row.createdBy());
+	}
+
+	/**
+	 * The caller (ACTIVE) and the repeat expense, when the caller may change it.
+	 * @throws ApiException 404 {@code recurring_not_found}, 403 {@code forbidden}
+	 */
+	private Editable editable(AuthUser principal, UUID id) {
+		User actor = this.actors.active(principal);
+		Row row = row(id);
+		if (!canEdit(row, actor)) {
+			throw new ApiException(HttpStatus.FORBIDDEN, "forbidden",
+					"Only the person who added it or the owner can change it");
+		}
+		return new Editable(actor, row);
+	}
+
+	private record Editable(User actor, Row row) {
+	}
+
+	/** Any ACTIVE user. @throws ApiException 400 {@code validation_error} */
 	@Transactional
 	public Recurring create(AuthUser principal, RecurringRequest request) {
-		User actor = this.actors.owner(principal);
+		User actor = this.actors.active(principal);
 		Valid valid = check(request, null);
 		UUID id = UUID.randomUUID();
 		Timestamp now = Timestamp.from(this.clock.instant());
@@ -183,8 +209,9 @@ public class CompanyRecurring {
 	 */
 	@Transactional
 	public Recurring update(AuthUser principal, UUID id, RecurringRequest request) {
-		User actor = this.actors.owner(principal);
-		Row row = row(id);
+		Editable editable = editable(principal, id);
+		User actor = editable.actor();
+		Row row = editable.row();
 		Valid valid = check(request, row);
 		this.jdbc.update("UPDATE company_recurring SET type = ?, amount = ?, description = ?, "
 				+ "category_id = ?, website = ?, repeat_unit = ?, repeat_every = ?, start_date = ?, end_date = ?, next_date = ?, "
@@ -202,8 +229,9 @@ public class CompanyRecurring {
 	 */
 	@Transactional
 	public Recurring setPaused(AuthUser principal, UUID id, boolean paused) {
-		User actor = this.actors.owner(principal);
-		Row row = row(id);
+		Editable editable = editable(principal, id);
+		User actor = editable.actor();
+		Row row = editable.row();
 		boolean pausedUntil = row.pausedUntil() != null && row.pausedUntil().isAfter(today(actor.getId()));
 		if (!paused && (row.paused() || pausedUntil)) {
 			Valid valid = new Valid(row.amount(), row.startDate(), row.endDate(), row.website());
@@ -227,8 +255,9 @@ public class CompanyRecurring {
 	 */
 	@Transactional
 	public Recurring pauseUntil(AuthUser principal, UUID id, String dateText) {
-		User actor = this.actors.owner(principal);
-		Row row = row(id);
+		Editable editable = editable(principal, id);
+		User actor = editable.actor();
+		Row row = editable.row();
 		LocalDate date = Recurrence.parseDate(dateText);
 		if (!date.isAfter(today(actor.getId()))) {
 			throw invalid("date: must be after today");
@@ -248,8 +277,9 @@ public class CompanyRecurring {
 	 */
 	@Transactional
 	public Recurring skip(AuthUser principal, UUID id, String dateText) {
-		User actor = this.actors.owner(principal);
-		Row row = row(id);
+		Editable editable = editable(principal, id);
+		User actor = editable.actor();
+		Row row = editable.row();
 		LocalDate date = Recurrence.parseDate(dateText);
 		if (!Recurrence.isSeriesDate(row.startDate(), row.unit(), row.every(), date)
 				|| (row.endDate() != null && date.isAfter(row.endDate()))) {
@@ -277,8 +307,9 @@ public class CompanyRecurring {
 	 */
 	@Transactional
 	public Recurring unskip(AuthUser principal, UUID id, String dateText) {
-		User actor = this.actors.owner(principal);
-		Row row = row(id);
+		Editable editable = editable(principal, id);
+		User actor = editable.actor();
+		Row row = editable.row();
 		LocalDate date = Recurrence.parseDate(dateText);
 		if (!date.isAfter(today(actor.getId()))) {
 			throw new ApiException(HttpStatus.CONFLICT, "too_late", "A skip can be undone only before its date");
@@ -313,8 +344,7 @@ public class CompanyRecurring {
 	 */
 	@Transactional
 	public void delete(AuthUser principal, UUID id) {
-		this.actors.owner(principal);
-		row(id);
+		editable(principal, id);
 		// Its reminders go with it, so their alerts go too (their links would be dead).
 		this.jdbc.update("DELETE FROM notifications WHERE dedupe_key IN (SELECT 'company-recurring:' || id || ':due' "
 				+ "FROM company_recurring_occurrences WHERE recurring_id = ?)", id);
@@ -322,17 +352,25 @@ public class CompanyRecurring {
 	}
 
 	/**
-	 * "Skip this time": the occurrence is closed without a transaction.
-	 * @throws ApiException 404 {@code occurrence_not_found}, 409 {@code occurrence_not_due}
+	 * "Skip this time": the occurrence is closed without a transaction. Its repeat's creator
+	 * or the OWNER.
+	 * @throws ApiException 404 {@code occurrence_not_found}, 409 {@code occurrence_not_due},
+	 * 403 {@code forbidden}
 	 */
 	@Transactional
 	public Occurrence skip(AuthUser principal, UUID occurrenceId) {
-		User actor = this.actors.owner(principal);
+		User actor = this.actors.active(principal);
 		lockDue(occurrenceId);
+		UUID recurringId = this.jdbc.queryForObject(
+				"SELECT recurring_id FROM company_recurring_occurrences WHERE id = ?", UUID.class, occurrenceId);
+		if (!canEdit(row(recurringId), actor)) {
+			throw new ApiException(HttpStatus.FORBIDDEN, "forbidden",
+					"Only the person who added it or the owner can skip it");
+		}
 		this.jdbc.update("UPDATE company_recurring_occurrences SET status = 'SKIPPED', done_by = ?, done_at = ? "
 				+ "WHERE id = ?", actor.getId(), Timestamp.from(this.clock.instant()), occurrenceId);
 		markAlertsRead(occurrenceId);
-		return occurrences("o.id = ?", List.of(occurrenceId), today(actor.getId())).get(0);
+		return occurrences("o.id = ?", List.of(occurrenceId), today(actor.getId()), actor).get(0);
 	}
 
 	/**
@@ -416,7 +454,7 @@ public class CompanyRecurring {
 			return;
 		}
 		List<Occurrence> due = occurrences("o.status = 'DUE' AND o.due_date <= ?", List.of(Date.valueOf(latestToday())),
-				latestToday());
+				latestToday(), null);
 		for (UUID manager : managers) {
 			LocalDate today = today(manager);
 			for (Occurrence occurrence : due) {
@@ -524,10 +562,12 @@ public class CompanyRecurring {
 		Integer due = this.jdbc.queryForObject("SELECT count(*) FROM company_recurring_occurrences WHERE "
 				+ "recurring_id = ? AND status = 'DUE' AND due_date <= ?", Integer.class, id,
 				Date.valueOf(today(viewer.getId())));
-		return views(List.of(row), today(viewer.getId())).recurring(row, (due != null) ? due : 0);
+		return views(List.of(row), today(viewer.getId())).recurring(row, (due != null) ? due : 0,
+				canEdit(row, viewer));
 	}
 
-	private List<Occurrence> occurrences(String where, List<Object> args, LocalDate today) {
+	/** @param viewer for {@code canEdit}; null = false */
+	private List<Occurrence> occurrences(String where, List<Object> args, LocalDate today, User viewer) {
 		List<OccurrenceRow> found = this.jdbc.query("SELECT o.id, o.recurring_id, o.due_date, o.status, "
 				+ "o.transaction_id FROM company_recurring_occurrences o WHERE " + where
 				+ " ORDER BY o.due_date, o.id", (rs, n) -> new OccurrenceRow(rs.getObject("id", UUID.class),
@@ -547,7 +587,7 @@ public class CompanyRecurring {
 			return new Occurrence(o.id(), o.recurringId(), o.dueDate(), o.status(),
 					"DUE".equals(o.status()) && o.dueDate().isBefore(today), o.transactionId(), row.type(),
 					Totals.money(row.amount()), row.description(), views.category(row),
-					row.website(), views.logoUrls(row));
+					row.website(), views.logoUrls(row), viewer != null && canEdit(row, viewer));
 		}).toList();
 	}
 
@@ -597,7 +637,8 @@ public class CompanyRecurring {
 				rs.getDate("start_date").toLocalDate(),
 				(end != null) ? end.toLocalDate() : null, (next != null) ? next.toLocalDate() : null,
 				rs.getBoolean("paused"),
-				(rs.getDate("paused_until") != null) ? rs.getDate("paused_until").toLocalDate() : null);
+				(rs.getDate("paused_until") != null) ? rs.getDate("paused_until").toLocalDate() : null,
+				rs.getObject("created_by", UUID.class));
 	}
 
 	private record Views(Map<UUID, Category> categories, Map<String, List<String>> logoUrls,
@@ -618,7 +659,7 @@ public class CompanyRecurring {
 					(parent != null) ? parent.getWebsite() : null);
 		}
 
-		Recurring recurring(Row row, int dueCount) {
+		Recurring recurring(Row row, int dueCount, boolean canEdit) {
 			java.util.Set<LocalDate> skipped = this.skips.getOrDefault(row.id(), java.util.Set.of());
 			Map<LocalDate, String> made = this.occurrences.getOrDefault(row.id(), Map.of());
 			LocalDate pausedUntil = (row.pausedUntil() != null && row.pausedUntil().isAfter(this.today))
@@ -635,7 +676,7 @@ public class CompanyRecurring {
 				.toList();
 			return new Recurring(row.id(), row.type(), Totals.money(row.amount()), row.description(),
 					category(row), row.website(), logoUrls(row), row.unit(), row.every(), row.startDate(), row.endDate(),
-					nextDate, row.paused(), pausedUntil, dueCount, upcoming);
+					nextDate, row.paused(), pausedUntil, dueCount, upcoming, canEdit);
 		}
 
 	}
@@ -654,7 +695,7 @@ public class CompanyRecurring {
 
 	private record Row(UUID id, String type, BigDecimal amount, String description, UUID categoryId,
 			String website, String unit, int every, LocalDate startDate, LocalDate endDate, LocalDate nextDate,
-			boolean paused, LocalDate pausedUntil) {
+			boolean paused, LocalDate pausedUntil, UUID createdBy) {
 	}
 
 	private record OccurrenceRow(UUID id, UUID recurringId, LocalDate dueDate, String status, UUID transactionId) {
@@ -671,11 +712,12 @@ public class CompanyRecurring {
 	 * as GET /api/recurring/due)
 	 * @param upcoming the next 6 dates from my today: UPCOMING, SKIPPED, PAUSED, or the reminder
 	 * status DUE / DONE / SKIPPED once it exists
+	 * @param canEdit true when I may change, pause, skip or delete it (its creator or the OWNER)
 	 */
 	public record Recurring(UUID id, String type, String amount, String description,
 			CategoryRef category, String website, List<String> logoUrls, String unit, int every, LocalDate startDate,
 			LocalDate endDate, LocalDate nextDate, boolean paused, LocalDate pausedUntil, int dueCount,
-			List<Recurrence.Upcoming> upcoming) {
+			List<Recurrence.Upcoming> upcoming, boolean canEdit) {
 	}
 
 	/**
@@ -683,13 +725,14 @@ public class CompanyRecurring {
 	 * @param status DUE, DONE or SKIPPED
 	 * @param overdue DUE and its date is before my today
 	 * @param transactionId the transaction saved from it (DONE), else null
+	 * @param canEdit true when I may skip it (its repeat's creator or the OWNER)
 	 */
 	public record Occurrence(UUID id, UUID recurringId, LocalDate dueDate, String status, boolean overdue,
 			UUID transactionId, String type, String amount, String description, CategoryRef category,
-			String website, List<String> logoUrls) {
+			String website, List<String> logoUrls, boolean canEdit) {
 	}
 
-	/** Body of POST and PUT /api/admin/recurring. The description is trimmed. */
+	/** Body of POST and PUT /api/recurring (and /api/admin/recurring). The description is trimmed. */
 	public record RecurringRequest(
 			@NotNull @Pattern(regexp = "EXPENSE|INCOME", message = "must be EXPENSE or INCOME") String type,
 			@NotNull String amount,
