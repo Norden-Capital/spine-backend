@@ -79,12 +79,15 @@ public class WalletTransactions {
 
 	private final WalletMoney money;
 
+	private final WalletGoals goals;
+
 	private final Clock clock;
 
 	public WalletTransactions(JdbcTemplate jdbc, WalletCategories categories,
 			StoredFileRepository files, FileService fileService, WalletBudgets budgets, UserZones zones,
-			LogoService logos, WalletMoney money, Clock clock) {
+			LogoService logos, WalletMoney money, WalletGoals goals, Clock clock) {
 		this.jdbc = jdbc;
+		this.goals = goals;
 		this.money = money;
 		this.categories = categories;
 		this.files = files;
@@ -147,11 +150,15 @@ public class WalletTransactions {
 
 	/**
 	 * Full replace (no duplicate check). Files left out are deleted. Currency left out = keep.
-	 * @throws ApiException 404 {@code transaction_not_found}, 400
+	 * @throws ApiException 404 {@code transaction_not_found}, 400, 409 {@code goal_money} (made by a
+	 * goal movement: change it on the Goals page)
 	 */
 	@Transactional
 	public WalletTx update(User user, UUID id, WalletTransactionRequest request) {
 		WalletTx existing = get(user, id);
+		if (existing.goalId() != null) {
+			throw new ApiException(HttpStatus.CONFLICT, "goal_money", "Change it on the Goals page.");
+		}
 		Checked checked = check(user, request, existing);
 		this.jdbc.update("UPDATE wallet_transactions SET type = ?, amount = ?, currency = ?, date = ?, description = ?, "
 				+ "website = ?, category_id = ?, updated_at = ? WHERE id = ? AND user_id = ?", checked.type(),
@@ -167,12 +174,18 @@ public class WalletTransactions {
 	}
 
 	/**
-	 * Hard delete, with its files.
-	 * @throws ApiException 404 {@code transaction_not_found}
+	 * Hard delete, with its files. Made by a goal movement: the movement goes too (same as its
+	 * undo on the Goals page).
+	 * @throws ApiException 404 {@code transaction_not_found}, 409 {@code not_enough_saved}
 	 */
 	@Transactional
 	public void delete(User user, UUID id) {
 		get(user, id);
+		java.util.Optional<UUID[]> movement = this.goals.movementOf(id);
+		if (movement.isPresent()) {
+			this.goals.removeContribution(user.getId(), movement.get()[0], movement.get()[1]);
+			return;
+		}
 		// Made by a recurring item: that date counts as skipped, so the item never makes it
 		// again (the job, a change of the item or Resume would see "nothing for that date").
 		this.jdbc.update("INSERT INTO wallet_recurring_skips (recurring_id, skip_date, created_at) "
@@ -304,6 +317,11 @@ public class WalletTransactions {
 		categoriesById.values().stream().map(WalletCategories.Category::website).filter(Objects::nonNull)
 			.forEach(domains::add);
 		Map<String, List<String>> logoUrls = this.logos.logoUrls(domains);
+		Map<UUID, UUID> goalIds = new HashMap<>();
+		this.jdbc.query("SELECT transaction_id, goal_id FROM wallet_goal_contributions WHERE transaction_id = ANY (?)",
+				(rs) -> {
+					goalIds.put(rs.getObject("transaction_id", UUID.class), rs.getObject("goal_id", UUID.class));
+				}, (Object) idArray);
 		List<WalletTx> result = new ArrayList<>();
 		for (UUID id : ids) {
 			Row row = rows.get(id);
@@ -319,7 +337,7 @@ public class WalletTransactions {
 					category.icon(), category.archived(), category.parentId(), category.kind()) : null;
 			result.add(new WalletTx(id, row.type(), Totals.money(row.amount()), row.currency(), row.date(),
 					row.description(), row.website(), txLogoUrls, categoryRef, filesByTx.getOrDefault(id, List.of()), row.recurringId(),
-					row.createdAt(), row.updatedAt()));
+					goalIds.get(id), row.createdAt(), row.updatedAt()));
 		}
 		return result;
 	}
@@ -360,11 +378,16 @@ public class WalletTransactions {
 	 * @param website bare domain like "claude.ai", or null
 	 * @param logoUrls logo image URLs to try in the browser, in order; empty = category icon
 	 * @param recurringId the recurring item that made it (null if added by hand)
+	 * @param goalId the goal whose movement made it (null for a normal transaction); such a
+	 * transaction cannot be changed here (409 goal_money), deleting it removes the movement
 	 * @param updatedAt null if never changed
 	 */
 	public record WalletTx(UUID id, String type, String amount, String currency, LocalDate date, String description,
-			String website, List<String> logoUrls, CategoryRef category, List<FileResponse> files, UUID recurringId, Instant createdAt,
-			Instant updatedAt) {
+			String website, List<String> logoUrls, CategoryRef category, List<FileResponse> files, UUID recurringId,
+			@io.swagger.v3.oas.annotations.media.Schema(nullable = true, description = "The goal whose movement made "
+					+ "it (add = EXPENSE, take out = INCOME); null for a normal transaction. PUT gives 409 goal_money; "
+					+ "DELETE also removes the goal movement.") UUID goalId,
+			Instant createdAt, Instant updatedAt) {
 	}
 
 	/**

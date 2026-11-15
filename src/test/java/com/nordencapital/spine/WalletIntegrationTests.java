@@ -40,7 +40,7 @@ class WalletIntegrationTests extends IntegrationTestBase {
 		Client a = loggedIn("ada@example.com");
 
 		assertThat(a.get("/api/wallet/status")).bodyJson().isStrictlyEqualTo(
-				"{\"hasPin\":false,\"unlocked\":false,\"lockedUntil\":null}");
+				"{\"hasPin\":false,\"unlocked\":false,\"lockedUntil\":null,\"passkey\":false}");
 		assertError(a.get("/api/wallet/dashboard"), HttpStatus.CONFLICT, "no_pin");
 		assertError(a.post("/api/wallet/unlock", "{\"pin\":\"123456\"}"), HttpStatus.CONFLICT, "no_pin");
 		assertError(a.post("/api/wallet/pin", "{\"pin\":\"12345\"}"), HttpStatus.BAD_REQUEST, "validation_error");

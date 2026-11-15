@@ -49,6 +49,15 @@ public class WalletCategories {
 
 	private static final String COLUMNS = "id, parent_id, name, icon, archived, website, position, kind";
 
+	/** system_key of the category that goal adds go to (EXPENSE). */
+	static final String GOALS_EXPENSE = "GOALS_EXPENSE";
+
+	/** system_key of the category that goal take outs go to (INCOME). */
+	static final String GOALS_INCOME = "GOALS_INCOME";
+
+	/** Icon of the two goal categories (coins = savings). */
+	static final String GOALS_ICON = "coins";
+
 	private final JdbcTemplate jdbc;
 
 	private final LogoService logos;
@@ -80,6 +89,43 @@ public class WalletCategories {
 					+ "created_at, updated_at) VALUES (?, ?, ?, ?, false, ?, ?, ?, ?)", UUID.randomUUID(), userId, seed[0],
 					seed[1], i, seed[2], now, now);
 		}
+	}
+
+	/**
+	 * My category for goal money, made when missing: "Goals" (EXPENSE, adds) or "From goals"
+	 * (INCOME, take outs). Found by its system key, so a rename never makes a second one. Names
+	 * are unique per person whatever the kind, so when the name is taken "Goals 2", "Goals 3", ...
+	 * are tried (same rule as the V36 backfill).
+	 * @param kind EXPENSE or INCOME
+	 * @return its id
+	 */
+	@Transactional
+	public UUID goalCategory(UUID userId, String kind) {
+		boolean expense = CategoryKinds.EXPENSE.equals(kind);
+		String key = expense ? GOALS_EXPENSE : GOALS_INCOME;
+		String base = expense ? "Goals" : "From goals";
+		List<String> names = new java.util.ArrayList<>(List.of(base, base + " 2", base + " 3", base + " 4", base + " 5"));
+		names.add(base + " " + UUID.randomUUID().toString().substring(0, 6));
+		for (String name : names) {
+			Optional<UUID> found = systemCategory(userId, key);
+			if (found.isPresent()) {
+				return found.get();
+			}
+			Timestamp now = Timestamp.from(this.clock.instant());
+			// ON CONFLICT: the name is taken (try the next one) or another request just made it.
+			this.jdbc.update("INSERT INTO wallet_categories (id, user_id, name, icon, archived, position, kind, "
+					+ "system_key, created_at, updated_at) VALUES (?, ?, ?, ?, false, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+					UUID.randomUUID(), userId, name, GOALS_ICON, endOf(userId, null, null), kind, key, now, now);
+		}
+		return systemCategory(userId, key).orElseThrow();
+	}
+
+	private Optional<UUID> systemCategory(UUID userId, String key) {
+		return this.jdbc
+			.queryForList("SELECT id FROM wallet_categories WHERE user_id = ? AND system_key = ?", UUID.class, userId,
+					key)
+			.stream()
+			.findFirst();
 	}
 
 	/**
@@ -250,6 +296,11 @@ public class WalletCategories {
 		if (wanted != null && !wanted.equals(category.kind())) {
 			if (parentId != null) {
 				throw CategoryKinds.subKind();
+			}
+			if (Boolean.TRUE.equals(this.jdbc.queryForObject(
+					"SELECT system_key IS NOT NULL FROM wallet_categories WHERE id = ?", Boolean.class, id))) {
+				throw new ApiException(HttpStatus.BAD_REQUEST, "validation_error",
+						"kind: this category holds goal money, its kind cannot change");
 			}
 			// A main category changes kind: its subcategories follow. Old transactions keep it.
 			this.jdbc.update("UPDATE wallet_categories SET kind = ? WHERE id = ? OR parent_id = ?", wanted, id, id);

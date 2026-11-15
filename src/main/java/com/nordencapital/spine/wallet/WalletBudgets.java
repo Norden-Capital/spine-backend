@@ -199,7 +199,10 @@ public class WalletBudgets {
 		}
 	}
 
-	/** This month's expenses (all currencies) in the budget's currency, not rounded. */
+	/**
+	 * This month's expenses (all currencies) in the budget's currency, not rounded. Transactions
+	 * made by goal movements do not count.
+	 */
 	private BigDecimal spent(UUID userId, Row row, YearMonth month, WalletMoney.Settings settings) {
 		String categoryFilter = "";
 		Object[] args;
@@ -215,6 +218,8 @@ public class WalletBudgets {
 		BigDecimal[] spent = { BigDecimal.ZERO };
 		this.jdbc.query("SELECT currency, sum(amount) AS total FROM wallet_transactions "
 				+ "WHERE user_id = ? AND type = 'EXPENSE' AND date >= ? AND date <= ?" + categoryFilter
+				// Goal money is saving, not spending.
+				+ " AND NOT EXISTS (SELECT 1 FROM wallet_goal_contributions c WHERE c.transaction_id = wallet_transactions.id)"
 				+ " GROUP BY currency", (rs) -> {
 					spent[0] = spent[0]
 						.add(settings.convert(rs.getBigDecimal("total"), rs.getString("currency"), row.currency()));

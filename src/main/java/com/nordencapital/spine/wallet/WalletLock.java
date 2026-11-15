@@ -22,6 +22,7 @@ import com.nordencapital.spine.auth.AuthLimiters;
 import com.nordencapital.spine.auth.AuthUser;
 import com.nordencapital.spine.auth.PasswordPolicy;
 import com.nordencapital.spine.common.ApiException;
+import com.nordencapital.spine.passkey.PasskeyService;
 import com.nordencapital.spine.user.Actors;
 import com.nordencapital.spine.user.User;
 
@@ -33,6 +34,8 @@ import com.nordencapital.spine.user.User;
  * wallet request starts the 15 minutes again. Logout locks it (the session is gone).</li>
  * <li>{@value #MAX_FAILURES} wrong PINs: locked for {@value #LOCK_MINUTES} minutes
  * (stored in the database, so a restart does not reset it).</li>
+ * <li>Passkey (Face ID): a checked passkey of the person unlocks exactly like a correct PIN.
+ * A failed passkey is not a wrong PIN.</li>
  * </ul>
  */
 @Component
@@ -56,11 +59,14 @@ public class WalletLock {
 
 	private final WalletCategories categories;
 
+	private final PasskeyService passkeys;
+
 	private final Clock clock;
 
 	public WalletLock(JdbcTemplate jdbc, PasswordEncoder passwordEncoder, Actors actors, AuthLimiters limiters,
-			WalletCategories categories, Clock clock) {
+			WalletCategories categories, PasskeyService passkeys, Clock clock) {
 		this.jdbc = jdbc;
+		this.passkeys = passkeys;
 		this.passwordEncoder = passwordEncoder;
 		this.actors = actors;
 		this.limiters = limiters;
@@ -75,7 +81,8 @@ public class WalletLock {
 		Instant lockedUntil = settings.map(Settings::lockedUntil)
 			.filter((until) -> until.isAfter(this.clock.instant()))
 			.orElse(null);
-		return new Status(settings.isPresent(), settings.isPresent() && isUnlocked(user.getId(), session), lockedUntil);
+		return new Status(settings.isPresent(), settings.isPresent() && isUnlocked(user.getId(), session), lockedUntil,
+				this.passkeys.count(user.getId()) > 0);
 	}
 
 	/**
@@ -120,6 +127,33 @@ public class WalletLock {
 			this.jdbc.update("UPDATE wallet_settings SET failed_attempts = ? WHERE user_id = ?", failures, user.getId());
 			throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_pin", "Wrong PIN");
 		}
+		this.jdbc.update("UPDATE wallet_settings SET failed_attempts = 0, locked_until = NULL WHERE user_id = ?",
+				user.getId());
+		unlockSession(user.getId(), session);
+	}
+
+	/**
+	 * Step 1 of a Face ID unlock: WebAuthn request options for my passkeys only.
+	 * @throws ApiException 409 {@code no_pin}
+	 */
+	public String passkeyOptions(AuthUser principal, HttpSession session) {
+		User user = this.actors.active(principal);
+		settings(user.getId()).orElseThrow(WalletLock::noPin);
+		return this.passkeys.walletOptions(principal, session);
+	}
+
+	/**
+	 * Step 2 of a Face ID unlock: a checked passkey of mine unlocks the wallet exactly like a
+	 * correct PIN (same session flag, wrong-PIN count back to 0). A strong check like the account
+	 * password (PIN reset), so it also ends a wrong-PIN lock. A failure does not count as a
+	 * wrong PIN.
+	 * @throws ApiException 409 {@code no_pin}, 400 {@code passkey_failed}, 429 {@code too_many_attempts}
+	 */
+	@Transactional(noRollbackFor = ApiException.class)
+	public void unlockWithPasskey(AuthUser principal, HttpSession session, String credentialJson) {
+		User user = this.actors.active(principal);
+		settings(user.getId()).orElseThrow(WalletLock::noPin);
+		this.passkeys.verifyForWallet(principal, session, credentialJson);
 		this.jdbc.update("UPDATE wallet_settings SET failed_attempts = 0, locked_until = NULL WHERE user_id = ?",
 				user.getId());
 		unlockSession(user.getId(), session);
@@ -223,8 +257,13 @@ public class WalletLock {
 	private record Settings(String pinHash, int failedAttempts, Instant lockedUntil) {
 	}
 
-	/** @param lockedUntil set while locked after too many wrong PINs */
-	public record Status(boolean hasPin, boolean unlocked, Instant lockedUntil) {
+	/**
+	 * @param lockedUntil set while locked after too many wrong PINs
+	 * @param passkey true if I have at least one passkey (the wallet can be unlocked with Face ID)
+	 */
+	public record Status(boolean hasPin, boolean unlocked, Instant lockedUntil,
+			@io.swagger.v3.oas.annotations.media.Schema(description = "I have at least one passkey: the wallet can be "
+					+ "unlocked with Face ID (POST /api/wallet/unlock/passkey)") boolean passkey) {
 	}
 
 	/** Kept in the session while the wallet is unlocked. */

@@ -30,8 +30,13 @@ import com.nordencapital.spine.common.Totals;
 
 /**
  * Saving goals with contributions. Each goal has its own currency (USD or MAD); its target,
- * contributions, saved and percent are in that currency. Money in goals leaves the wallet
- * balance (see the dashboard).
+ * contributions, saved and percent are in that currency.
+ * <p>
+ * Every movement has its own wallet transaction (same amount, goal currency, movement date,
+ * description "Goal: name"): an add is an EXPENSE in my "Goals" category, a take out an INCOME in
+ * my "From goals" category. So the wallet balance (income - expense) already holds goal money.
+ * Removing a movement, or the goal, removes its transactions too. Budgets ignore these
+ * transactions (saving is not spending).
  */
 @Component
 public class WalletGoals {
@@ -40,11 +45,14 @@ public class WalletGoals {
 
 	private final WalletMoney money;
 
+	private final WalletCategories categories;
+
 	private final Clock clock;
 
-	public WalletGoals(JdbcTemplate jdbc, WalletMoney money, Clock clock) {
+	public WalletGoals(JdbcTemplate jdbc, WalletMoney money, WalletCategories categories, Clock clock) {
 		this.jdbc = jdbc;
 		this.money = money;
+		this.categories = categories;
 		this.clock = clock;
 	}
 
@@ -61,14 +69,15 @@ public class WalletGoals {
 				userId);
 		Map<UUID, List<Contribution>> contributions = new HashMap<>();
 		Map<UUID, BigDecimal> saved = new HashMap<>();
-		this.jdbc.query("SELECT c.id, c.goal_id, c.amount, c.date, c.note FROM wallet_goal_contributions c "
+		this.jdbc.query("SELECT c.id, c.goal_id, c.amount, c.date, c.note, c.transaction_id FROM wallet_goal_contributions c "
 				+ "JOIN wallet_goals g ON g.id = c.goal_id WHERE g.user_id = ? ORDER BY c.date DESC, c.created_at DESC",
 				(rs) -> {
 					UUID goalId = rs.getObject("goal_id", UUID.class);
 					BigDecimal amount = rs.getBigDecimal("amount");
 					contributions.computeIfAbsent(goalId, (k) -> new ArrayList<>())
 						.add(new Contribution(rs.getObject("id", UUID.class), (amount.signum() < 0) ? TAKE_OUT : ADD,
-								Totals.money(amount.abs()), rs.getDate("date").toLocalDate(), rs.getString("note")));
+								Totals.money(amount.abs()), rs.getDate("date").toLocalDate(), rs.getString("note"),
+								rs.getObject("transaction_id", UUID.class)));
 					saved.merge(goalId, amount, BigDecimal::add);
 				}, userId);
 		return goals.stream().map((g) -> {
@@ -98,16 +107,22 @@ public class WalletGoals {
 
 	/**
 	 * Currency left out = keep. A new currency also applies to the money already in the goal
-	 * (amounts are not converted).
+	 * (amounts are not converted), and to its transactions. A new name also renames their
+	 * description ("Goal: name").
 	 * @throws ApiException 404 {@code goal_not_found}, 400
 	 */
 	@Transactional
 	public Goal update(UUID userId, UUID id, GoalRequest request) {
 		mine(userId, id);
 		BigDecimal target = Money.parse("target", request.target());
+		Timestamp now = Timestamp.from(this.clock.instant());
 		this.jdbc.update("UPDATE wallet_goals SET name = ?, target = ?, currency = coalesce(?, currency), deadline = ?, "
 				+ "updated_at = ? WHERE id = ? AND user_id = ?", request.name(), target, request.currency(),
-				date("deadline", request.deadline()), Timestamp.from(this.clock.instant()), id, userId);
+				date("deadline", request.deadline()), now, id, userId);
+		this.jdbc.update("UPDATE wallet_transactions t SET currency = g.currency, description = left('Goal: ' || g.name, 200), "
+				+ "updated_at = ? FROM wallet_goal_contributions c, wallet_goals g WHERE c.transaction_id = t.id "
+				+ "AND g.id = c.goal_id AND g.id = ? AND t.user_id = ? "
+				+ "AND (t.currency <> g.currency OR t.description <> left('Goal: ' || g.name, 200))", now, id, userId);
 		return one(userId, id);
 	}
 
@@ -130,11 +145,18 @@ public class WalletGoals {
 		return list(userId);
 	}
 
-	/** Deletes the goal and its contributions. @throws ApiException 404 */
+	/**
+	 * Deletes the goal, its contributions and their transactions (the money is back in the
+	 * balance). @throws ApiException 404
+	 */
 	@Transactional
 	public void delete(UUID userId, UUID id) {
 		mine(userId, id);
+		List<UUID> transactions = this.jdbc.queryForList(
+				"SELECT transaction_id FROM wallet_goal_contributions WHERE goal_id = ? AND transaction_id IS NOT NULL",
+				UUID.class, id);
 		this.jdbc.update("DELETE FROM wallet_goals WHERE id = ? AND user_id = ?", id, userId);
+		deleteTransactions(userId, transactions);
 	}
 
 	/** @return the whole goal, updated. @throws ApiException 404, 400 */
@@ -154,8 +176,9 @@ public class WalletGoals {
 	}
 
 	/**
-	 * All money now in my goals (it is not in the wallet balance), each goal converted into the
-	 * default currency of {@code settings} (not rounded).
+	 * All money now in my goals (information only: the balance already left it out, through
+	 * the goal transactions), each goal converted into the default currency of {@code settings}
+	 * (not rounded).
 	 */
 	@Transactional(readOnly = true)
 	public BigDecimal savedTotal(UUID userId, WalletMoney.Settings settings) {
@@ -195,14 +218,48 @@ public class WalletGoals {
 		if (date == null) {
 			throw invalid("date: must not be empty");
 		}
-		this.jdbc.update("INSERT INTO wallet_goal_contributions (id, goal_id, amount, date, note, created_at) "
-				+ "VALUES (?, ?, ?, ?, ?, ?)", UUID.randomUUID(), goalId, amount, date,
-				(request.note() != null && !request.note().isBlank()) ? request.note().strip() : null,
-				Timestamp.from(this.clock.instant()));
+		Timestamp now = Timestamp.from(this.clock.instant());
+		String type = takeOut ? "INCOME" : "EXPENSE";
+		UUID categoryId = this.categories.goalCategory(userId, type);
+		UUID transactionId = UUID.randomUUID();
+		this.jdbc.update("INSERT INTO wallet_transactions (id, user_id, type, amount, currency, date, description, "
+				+ "category_id, created_at) SELECT ?, ?, ?, ?, currency, ?, left('Goal: ' || name, 200), ?, ? "
+				+ "FROM wallet_goals WHERE id = ?", transactionId, userId, type, amount.abs(), date, categoryId, now,
+				goalId);
+		this.jdbc.update("INSERT INTO wallet_goal_contributions (id, goal_id, amount, date, note, transaction_id, "
+				+ "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", UUID.randomUUID(), goalId, amount, date,
+				(request.note() != null && !request.note().isBlank()) ? request.note().strip() : null, transactionId,
+				now);
 		return one(userId, goalId);
 	}
 
-	/** @return the whole goal, updated. @throws ApiException 404 */
+	/** Goal transactions are plain rows (never files): just delete them, and alerts that link to them. */
+	private void deleteTransactions(UUID userId, List<UUID> ids) {
+		for (UUID id : ids) {
+			this.jdbc.update("DELETE FROM wallet_transactions WHERE id = ? AND user_id = ?", id, userId);
+			this.jdbc.update("DELETE FROM notifications WHERE user_id = ? AND link = ?", userId,
+					"/wallet/transactions/" + id);
+		}
+	}
+
+	/**
+	 * The goal movement made with this transaction, if any.
+	 * @return [goalId, contributionId], or empty for a normal transaction
+	 */
+	@Transactional(readOnly = true)
+	public java.util.Optional<UUID[]> movementOf(UUID transactionId) {
+		return this.jdbc
+			.query("SELECT goal_id, id FROM wallet_goal_contributions WHERE transaction_id = ?",
+					(rs, row) -> new UUID[] { rs.getObject("goal_id", UUID.class), rs.getObject("id", UUID.class) },
+					transactionId)
+			.stream()
+			.findFirst();
+	}
+
+	/**
+	 * Undo of one movement: removes it and its transaction.
+	 * @return the whole goal, updated. @throws ApiException 404, 409 {@code not_enough_saved}
+	 */
 	@Transactional
 	public Goal removeContribution(UUID userId, UUID goalId, UUID contributionId) {
 		mine(userId, goalId);
@@ -214,11 +271,15 @@ public class WalletGoals {
 		if (!amount.isEmpty() && saved(goalId).subtract(amount.get(0)).signum() < 0) {
 			throw notEnoughSaved(goalId, saved(goalId));
 		}
+		List<UUID> transaction = this.jdbc.queryForList(
+				"SELECT transaction_id FROM wallet_goal_contributions WHERE id = ? AND goal_id = ? AND transaction_id IS NOT NULL",
+				UUID.class, contributionId, goalId);
 		int deleted = this.jdbc.update("DELETE FROM wallet_goal_contributions WHERE id = ? AND goal_id = ?",
 				contributionId, goalId);
 		if (deleted == 0) {
 			throw new ApiException(HttpStatus.NOT_FOUND, "contribution_not_found", "Contribution not found");
 		}
+		deleteTransactions(userId, transaction);
 		return one(userId, goalId);
 	}
 
@@ -265,8 +326,12 @@ public class WalletGoals {
 	 * One movement of a goal.
 	 * @param type ADD (money put in, out of the wallet balance) or TAKE_OUT (back to the balance)
 	 * @param amount always positive, in the goal's currency
+	 * @param transactionId its wallet transaction (ADD = EXPENSE in "Goals", TAKE_OUT = INCOME in
+	 * "From goals")
 	 */
-	public record Contribution(UUID id, String type, String amount, LocalDate date, String note) {
+	public record Contribution(UUID id, String type, String amount, LocalDate date, String note,
+			@io.swagger.v3.oas.annotations.media.Schema(description = "Its wallet transaction: ADD = EXPENSE in my "
+					+ "\"Goals\" category, TAKE_OUT = INCOME in \"From goals\"") UUID transactionId) {
 	}
 
 	static final String ADD = "ADD";

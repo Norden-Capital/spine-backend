@@ -75,7 +75,8 @@ public class WalletController {
 
 	// ---- PIN and lock ----
 
-	@Operation(summary = "Wallet status", description = "Always allowed.")
+	@Operation(summary = "Wallet status", description = "Always allowed. passkey = I have at least one passkey "
+			+ "(offer Face ID unlock).")
 	@GetMapping("/api/wallet/status")
 	public WalletLock.Status status(@AuthenticationPrincipal AuthUser actor, HttpServletRequest request) {
 		return this.lock.status(actor, request.getSession(false));
@@ -99,6 +100,28 @@ public class WalletController {
 		return ResponseEntity.noContent().build();
 	}
 
+	@Operation(summary = "Start a Face ID unlock",
+			description = "Returns PublicKeyCredentialRequestOptionsJSON, same shape as POST /api/auth/passkey/options, "
+					+ "but allowCredentials = only my passkeys and userVerification = required. Valid 5 minutes, once. "
+					+ "409 no_pin.")
+	@PostMapping(path = "/api/wallet/unlock/passkey/options",
+			produces = org.springframework.http.MediaType.APPLICATION_JSON_VALUE)
+	public String unlockPasskeyOptions(@AuthenticationPrincipal AuthUser actor, HttpServletRequest request) {
+		return this.lock.passkeyOptions(actor, request.getSession());
+	}
+
+	@Operation(summary = "Unlock the wallet with Face ID (a passkey)",
+			description = "Body: {\"credential\": AuthenticationResponseJSON} (credential.toJSON()), same as passkey "
+					+ "login. The passkey must be mine. Same effect as a correct PIN (15 minutes, wrong-PIN count reset; "
+					+ "it also ends a wrong-PIN lock). 400 passkey_failed (not counted as a wrong PIN); 429 "
+					+ "too_many_attempts after 5 failures; 409 no_pin.")
+	@PostMapping("/api/wallet/unlock/passkey")
+	public ResponseEntity<Void> unlockWithPasskey(@AuthenticationPrincipal AuthUser actor,
+			@Valid @RequestBody PasskeyUnlockRequest body, HttpServletRequest request) {
+		this.lock.unlockWithPasskey(actor, request.getSession(), body.credential().toString());
+		return ResponseEntity.noContent().build();
+	}
+
 	@Operation(summary = "Lock the wallet now")
 	@PostMapping("/api/wallet/lock")
 	public ResponseEntity<Void> lockNow(HttpServletRequest request) {
@@ -117,7 +140,8 @@ public class WalletController {
 	// ---- dashboard ----
 
 	@Operation(summary = "Wallet dashboard",
-			description = "Balance (all time), this month in/out/net, budgets, goals, 5 latest transactions. "
+			description = "Balance (all time income - expense; goal money is already in it as transactions), this "
+					+ "month in/out/net (goal transactions count), budgets, goals, 5 latest transactions. "
 					+ "balance, savedInGoals and thisMonth are in my default wallet currency (`currency`), each item "
 					+ "converted with my rate (`usdRate`: 1 USD = usdRate MAD). Budgets, goals and transactions keep "
 					+ "their own currency.")
@@ -128,7 +152,7 @@ public class WalletController {
 		WalletMoney.Settings settings = this.money.settings(user.getId());
 		java.math.BigDecimal net = this.transactions.balance(user.getId(), settings);
 		java.math.BigDecimal saved = this.goals.savedTotal(user.getId(), settings);
-		return new Dashboard(Totals.money(net.subtract(saved)), Totals.money(saved),
+		return new Dashboard(Totals.money(net), Totals.money(saved),
 				this.transactions.totals(user.getId(), month.atDay(1), month.atEndOfMonth(), settings),
 				settings.currency(), settings.usdRateText(),
 				this.budgets.list(user.getId()), this.goals.list(user.getId()), this.transactions.recent(user.getId(), 5));
@@ -226,7 +250,8 @@ public class WalletController {
 	}
 
 	@Operation(summary = "Change a wallet transaction (send all fields)",
-			description = "currency left out = keep the transaction's currency.")
+			description = "currency left out = keep the transaction's currency. 409 goal_money when goalId is set "
+					+ "(made by a goal movement: change it on the Goals page).")
 	@PutMapping("/api/wallet/transactions/{id}")
 	public WalletTransactions.WalletTx updateTransaction(@AuthenticationPrincipal AuthUser actor,
 			@PathVariable UUID id, @Valid @RequestBody WalletTransactionRequest body, HttpServletRequest request) {
@@ -234,7 +259,9 @@ public class WalletController {
 	}
 
 	@Operation(summary = "Delete a wallet transaction", description = "Hard delete, with its files. If a "
-			+ "recurring item made it, that date becomes a skipped date of the item (it is not made again).")
+			+ "recurring item made it, that date becomes a skipped date of the item (it is not made again). If a goal "
+			+ "movement made it (goalId set), the movement is removed too, like its undo (409 not_enough_saved when "
+			+ "removing an add would leave the goal below 0).")
 	@DeleteMapping("/api/wallet/transactions/{id}")
 	public ResponseEntity<Void> deleteTransaction(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			HttpServletRequest request) {
@@ -245,7 +272,8 @@ public class WalletController {
 	// ---- budgets ----
 
 	@Operation(summary = "My monthly budgets", description = "Each budget has its own currency; spent = this month's "
-			+ "expenses converted into the budget's currency with my rate.")
+			+ "expenses converted into the budget's currency with my rate. Goal money (transactions with goalId) "
+			+ "does not count.")
 	@GetMapping("/api/wallet/budgets")
 	public List<WalletBudgets.Budget> budgets(@AuthenticationPrincipal AuthUser actor, HttpServletRequest request) {
 		return this.budgets.list(me(actor, request).getId());
@@ -313,6 +341,8 @@ public class WalletController {
 		return this.goals.update(me(actor, request).getId(), id, body);
 	}
 
+	@Operation(summary = "Delete a goal", description = "Also deletes its movements and their transactions (the "
+			+ "money is back in the balance).")
 	@DeleteMapping("/api/wallet/goals/{id}")
 	public ResponseEntity<Void> deleteGoal(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			HttpServletRequest request) {
@@ -321,7 +351,9 @@ public class WalletController {
 	}
 
 	@Operation(summary = "Add money to a goal", description = "Returns the whole goal. amount is in the goal's "
-			+ "currency. The money leaves the wallet balance (it is a transfer: not counted as spending this month).")
+			+ "currency. Makes a wallet EXPENSE in my \"Goals\" category (made when missing): same amount, goal "
+			+ "currency, movement date, description \"Goal: <name>\" (the note stays on the movement). It counts in "
+			+ "this month's out and list totals, not in budgets.")
 	@PostMapping("/api/wallet/goals/{id}/contributions")
 	public ResponseEntity<WalletGoals.Goal> contribute(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody WalletGoals.ContributionRequest body, HttpServletRequest request) {
@@ -329,16 +361,16 @@ public class WalletController {
 			.body(this.goals.contribute(me(actor, request).getId(), id, body));
 	}
 
-	@Operation(summary = "Take money out of a goal", description = "Body like Add money. The money goes back to the "
-			+ "wallet balance. 409 not_enough_saved when the goal holds less.")
+	@Operation(summary = "Take money out of a goal", description = "Body like Add money. Makes a wallet INCOME in my "
+			+ "\"From goals\" category (made when missing). 409 not_enough_saved when the goal holds less.")
 	@PostMapping("/api/wallet/goals/{id}/take-out")
 	public ResponseEntity<WalletGoals.Goal> takeOut(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody WalletGoals.ContributionRequest body, HttpServletRequest request) {
 		return ResponseEntity.status(HttpStatus.CREATED).body(this.goals.takeOut(me(actor, request).getId(), id, body));
 	}
 
-	@Operation(summary = "Remove one goal movement", description = "Undoes an add or a take out (the balance follows). "
-			+ "409 not_enough_saved if removing an add would leave the goal below 0.")
+	@Operation(summary = "Remove one goal movement", description = "Undoes an add or a take out and deletes its "
+			+ "transaction (the balance follows). 409 not_enough_saved if removing an add would leave the goal below 0.")
 	@DeleteMapping("/api/wallet/goals/{id}/contributions/{contributionId}")
 	public WalletGoals.Goal removeContribution(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@PathVariable UUID contributionId, HttpServletRequest request) {
@@ -424,6 +456,10 @@ public class WalletController {
 	public record PinRequest(@Schema(example = "123456") String pin) {
 	}
 
+	public record PasskeyUnlockRequest(
+			@Schema(description = "AuthenticationResponseJSON (credential.toJSON())") @NotNull JsonNode credential) {
+	}
+
 	public record PinResetRequest(String password, @Schema(example = "654321") String newPin) {
 	}
 
@@ -460,10 +496,10 @@ public class WalletController {
 	}
 
 	/**
-	 * @param balance available now: all-time INCOME - EXPENSE - money in goals (goal money left the
-	 * wallet; taking it out of a goal, or deleting the goal, brings it back)
-	 * @param savedInGoals all money now in my goals
-	 * @param thisMonth this month in/out/net of transactions only (goal moves are transfers, not spending)
+	 * @param balance available now: all-time INCOME - EXPENSE (goal adds are EXPENSE and take outs
+	 * INCOME transactions, so goal money is already out of it)
+	 * @param savedInGoals all money now in my goals (information only, not subtracted again)
+	 * @param thisMonth this month in/out/net of all transactions (goal transactions too)
 	 * @param currency my default wallet currency: balance, savedInGoals and thisMonth are in it
 	 * @param usdRate my rate used for them, 1 USD = usdRate MAD, e.g. "10.00"
 	 */

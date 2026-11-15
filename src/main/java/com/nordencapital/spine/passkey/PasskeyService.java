@@ -71,6 +71,8 @@ public class PasskeyService {
 
 	private static final String LOGIN_KEY = "spine.passkey.login";
 
+	private static final String WALLET_KEY = "spine.passkey.wallet";
+
 	private static final Logger logger = LoggerFactory.getLogger(PasskeyService.class);
 
 	/** Jackson 2, the JSON library the WebAuthn library uses. */
@@ -265,6 +267,83 @@ public class PasskeyService {
 		this.loginEvents.record(knownUserId, true, clientIp, now);
 		this.limiters.passkeyLogin().reset(limitKey);
 		return new LoggedIn(user.get(), passkey.get().getId());
+	}
+
+	// ---- wallet unlock (the person is already logged in) ----
+
+	/**
+	 * Step 1 of a wallet unlock with a passkey: same options as login, but only my passkeys
+	 * (allowCredentials) and user verification required. Kept apart from a login ceremony.
+	 * @return PublicKeyCredentialRequestOptionsJSON (binary values in base64url)
+	 */
+	@Transactional(readOnly = true)
+	public String walletOptions(AuthUser principal, HttpSession session) {
+		User user = this.actors.active(principal);
+		AssertionRequest request = this.relyingParty.startAssertion(StartAssertionOptions.builder()
+			.username(user.getEmail())
+			.userVerification(UserVerificationRequirement.REQUIRED)
+			.timeout(BROWSER_TIMEOUT_MS)
+			.build());
+		try {
+			session.setAttribute(WALLET_KEY, new Pending(request.toJson(), user.getId(), expiry()));
+			return publicKeyPart(request.toCredentialsGetJson());
+		}
+		catch (IOException ex) {
+			throw new IllegalStateException("Could not write passkey options", ex);
+		}
+	}
+
+	/**
+	 * Step 2 of a wallet unlock: the same WebAuthn checks as login (challenge, origin, signature,
+	 * user verification, counter), plus: the options were made for me and the passkey is mine.
+	 * Not a login: no login history, no new session. The transaction is not rolled back by the
+	 * error, so the failed try stays counted.
+	 * @param credentialJson AuthenticationResponseJSON from the browser
+	 * @return the person (checked)
+	 * @throws ApiException 400 {@code passkey_failed} or 429 {@code too_many_attempts}
+	 */
+	@Transactional(noRollbackFor = ApiException.class)
+	public User verifyForWallet(AuthUser principal, HttpSession session, String credentialJson) {
+		User user = this.actors.active(principal);
+		String limitKey = "wallet-passkey|" + user.getId();
+		if (this.limiters.passkeyLogin().isBlocked(limitKey)) {
+			throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "too_many_attempts",
+					"Too many attempts. Please wait and try again later");
+		}
+		Optional<Pending> pending = take(session, WALLET_KEY).filter((p) -> user.getId().equals(p.userId()));
+		PublicKeyCredential<AuthenticatorAssertionResponse, ClientAssertionExtensionOutputs> credential;
+		try {
+			credential = PublicKeyCredential.parseAssertionResponseJson(credentialJson);
+		}
+		catch (IOException ex) {
+			throw walletFailed(limitKey);
+		}
+		Optional<Passkey> passkey = this.passkeys.findByCredentialId(credential.getId().getBytes())
+			.filter((p) -> p.getUserId().equals(user.getId()));
+		if (pending.isEmpty() || passkey.isEmpty()) {
+			throw walletFailed(limitKey);
+		}
+		AssertionResult result;
+		try {
+			AssertionRequest request = AssertionRequest.fromJson(pending.get().json());
+			result = this.relyingParty
+				.finishAssertion(FinishAssertionOptions.builder().request(request).response(credential).build());
+		}
+		catch (IOException | AssertionFailedException ex) {
+			logger.info("Passkey wallet unlock failed for user {}: {}", user.getId(), ex.getMessage());
+			throw walletFailed(limitKey);
+		}
+		if (!result.isSuccess() || !result.getCredential().getUserHandle().equals(PasskeyCredentials.handle(user.getId()))) {
+			throw walletFailed(limitKey);
+		}
+		passkey.get().recordUse(result.getSignatureCount(), this.clock.instant());
+		this.limiters.passkeyLogin().reset(limitKey);
+		return user;
+	}
+
+	private ApiException walletFailed(String limitKey) {
+		this.limiters.passkeyLogin().record(limitKey);
+		return new ApiException(HttpStatus.BAD_REQUEST, "passkey_failed", "Face ID did not work");
 	}
 
 	/** A passkey login: who, and with which passkey. */
