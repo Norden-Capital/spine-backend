@@ -6,6 +6,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -50,7 +51,10 @@ import com.nordencapital.spine.common.Totals;
 import com.nordencapital.spine.common.Websites;
 import com.nordencapital.spine.logo.LogoService;
 import com.nordencapital.spine.me.UserZones;
+import com.nordencapital.spine.transaction.HistoryEntry;
+import com.nordencapital.spine.transaction.HistoryEntry.Change;
 import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
+import com.nordencapital.spine.transaction.TransactionResponse.UserRef;
 import com.nordencapital.spine.user.Actors;
 import com.nordencapital.spine.user.Role;
 import com.nordencapital.spine.user.User;
@@ -95,8 +99,11 @@ public class CompanyRecurring {
 	private static final String LEAD = "(SELECT coalesce(max(d), 0) FROM company_recurring r, unnest(r.remind_days) d "
 			+ "WHERE r.id = o.recurring_id)";
 
-	/** Waiting reminders that show to someone whose today is the parameter. */
-	private static final String SHOWN_DUE = "o.status = 'DUE' AND o.due_date - " + LEAD + " <= ?";
+	/** SQL: the occurrence {@code o} belongs to a repeat that is not in the trash. */
+	private static final String LIVE = "o.recurring_id IN (SELECT id FROM company_recurring WHERE deleted_at IS NULL)";
+
+	/** Waiting reminders that show to someone whose today is the parameter (repeats in the trash: hidden). */
+	private static final String SHOWN_DUE = "o.status = 'DUE' AND " + LIVE + " AND o.due_date - " + LEAD + " <= ?";
 
 	private static final DateTimeFormatter ALERT_DATE = DateTimeFormatter.ofPattern("EEE d MMM", Locale.ENGLISH);
 
@@ -118,11 +125,13 @@ public class CompanyRecurring {
 
 	private final TransactionTemplate transaction;
 
+	private final CompanyRecurringHistory history;
+
 	private final Clock clock;
 
 	public CompanyRecurring(JdbcTemplate jdbc, CategoryRepository categories, CategoryService categoryService,
 			LogoService logos, AlertService alerts, Actors actors, UserZones zones, TransactionTemplate transaction,
-			Clock clock) {
+			CompanyRecurringHistory history, Clock clock) {
 		this.jdbc = jdbc;
 		this.categories = categories;
 		this.categoryService = categoryService;
@@ -131,16 +140,17 @@ public class CompanyRecurring {
 		this.actors = actors;
 		this.zones = zones;
 		this.transaction = transaction;
+		this.history = history;
 		this.clock = clock;
 	}
 
 	// ---- reading (everyone) ----
 
-	/** All repeat expenses, next date first (finished ones last). */
+	/** All repeat expenses (not in the trash), next date first (finished ones last). */
 	@Transactional(readOnly = true)
 	public List<Recurring> list(AuthUser principal) {
 		User user = this.actors.active(principal);
-		List<Row> rows = this.jdbc.query("SELECT " + COLUMNS + " FROM company_recurring "
+		List<Row> rows = this.jdbc.query("SELECT " + COLUMNS + " FROM company_recurring WHERE deleted_at IS NULL "
 				+ "ORDER BY next_date NULLS LAST, description", CompanyRecurring::map);
 		Map<UUID, Integer> due = new HashMap<>();
 		this.jdbc.query("SELECT o.recurring_id, count(*) AS n FROM company_recurring_occurrences o WHERE " + SHOWN_DUE
@@ -173,12 +183,12 @@ public class CompanyRecurring {
 
 	/**
 	 * One occurrence (any status), with the values to pre-fill the new transaction.
-	 * @throws ApiException 404 {@code occurrence_not_found}
+	 * @throws ApiException 404 {@code occurrence_not_found} (also when its repeat is in the trash)
 	 */
 	@Transactional(readOnly = true)
 	public Occurrence occurrence(AuthUser principal, UUID id) {
 		User user = this.actors.active(principal);
-		return occurrences("o.id = ?", List.of(id), today(user.getId()), user).stream()
+		return occurrences("o.id = ? AND " + LIVE, List.of(id), today(user.getId()), user).stream()
 			.findFirst()
 			.orElseThrow(CompanyRecurring::occurrenceNotFound);
 	}
@@ -222,6 +232,9 @@ public class CompanyRecurring {
 				valid.amount(), request.description(), request.categoryId(), valid.website(), request.unit(),
 				request.every(), Date.valueOf(valid.start()), date(valid.end()),
 				date(firstFrom(valid, today(actor.getId()))), actor.getId(), now, now, remindDays.toArray(Integer[]::new));
+		this.history.record(id, actor.getId(), CompanyRecurringHistory.CREATED,
+				CompanyRecurringHistory.diff(CompanyRecurringHistory.Snapshot.EMPTY, snapshot(request, valid, remindDays)),
+				now.toInstant());
 		this.logos.prefetch(valid.website());
 		runOne(id);
 		return one(id, actor);
@@ -239,12 +252,17 @@ public class CompanyRecurring {
 		Row row = editable.row();
 		Valid valid = check(request, row);
 		List<Integer> remindDays = remindDays(request.remindDays(), row.remindDays());
+		List<Change> changes = CompanyRecurringHistory.diff(snapshot(row), snapshot(request, valid, remindDays));
+		Instant now = this.clock.instant();
 		this.jdbc.update("UPDATE company_recurring SET type = ?, amount = ?, description = ?, "
 				+ "category_id = ?, website = ?, repeat_unit = ?, repeat_every = ?, start_date = ?, end_date = ?, next_date = ?, "
 				+ "remind_days = ?, updated_at = ? WHERE id = ?", request.type(), valid.amount(), request.description(),
 				request.categoryId(), valid.website(), request.unit(), request.every(), Date.valueOf(valid.start()), date(valid.end()),
 				date(firstFrom(valid, from(row, actor))), remindDays.toArray(Integer[]::new),
-				Timestamp.from(this.clock.instant()), id);
+				Timestamp.from(now), id);
+		if (!changes.isEmpty()) {
+			this.history.record(id, actor.getId(), CompanyRecurringHistory.UPDATED, changes, now);
+		}
 		this.logos.prefetch(valid.website());
 		runOne(id);
 		return one(id, actor);
@@ -265,11 +283,15 @@ public class CompanyRecurring {
 			this.jdbc.update("UPDATE company_recurring SET paused = false, paused_until = NULL, next_date = ?, "
 					+ "updated_at = ? WHERE id = ?",
 					date(firstFrom(valid, today(actor.getId()), row.unit(), row.every())), Timestamp.from(this.clock.instant()), id);
+			this.history.record(id, actor.getId(), CompanyRecurringHistory.RESUMED, List.of(), this.clock.instant());
 			runOne(id);
 		}
 		else if (paused && (!row.paused() || row.pausedUntil() != null)) {
 			this.jdbc.update("UPDATE company_recurring SET paused = true, paused_until = NULL, updated_at = ? WHERE id = ?",
 					Timestamp.from(this.clock.instant()), id);
+			if (!row.paused()) {
+				this.history.record(id, actor.getId(), CompanyRecurringHistory.PAUSED, List.of(), this.clock.instant());
+			}
 		}
 		return one(id, actor);
 	}
@@ -293,6 +315,12 @@ public class CompanyRecurring {
 		this.jdbc.update("UPDATE company_recurring SET paused = false, paused_until = ?, next_date = ?, updated_at = ? "
 				+ "WHERE id = ?", Date.valueOf(date), date(firstFrom(valid, date, row.unit(), row.every())),
 				Timestamp.from(this.clock.instant()), id);
+		LocalDate before = (row.pausedUntil() != null && row.pausedUntil().isAfter(today(actor.getId())))
+				? row.pausedUntil() : null;
+		if (!date.equals(before)) {
+			this.history.record(id, actor.getId(), CompanyRecurringHistory.PAUSED_UNTIL,
+					CompanyRecurringHistory.date("pausedUntil", before, date), this.clock.instant());
+		}
 		return one(id, actor);
 	}
 
@@ -321,9 +349,13 @@ public class CompanyRecurring {
 			throw new ApiException(HttpStatus.CONFLICT, "occurrence_exists",
 					"This reminder is already there: use \"Skip this time\" on it");
 		}
-		this.jdbc.update("INSERT INTO company_recurring_skips (recurring_id, skip_date, created_by, created_at) "
+		int added = this.jdbc.update("INSERT INTO company_recurring_skips (recurring_id, skip_date, created_by, created_at) "
 				+ "VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", id, Date.valueOf(date), actor.getId(),
 				Timestamp.from(this.clock.instant()));
+		if (added > 0) {
+			this.history.record(id, actor.getId(), CompanyRecurringHistory.SKIPPED,
+					CompanyRecurringHistory.date("skipDate", null, date), this.clock.instant());
+		}
 		return one(id, actor);
 	}
 
@@ -343,6 +375,10 @@ public class CompanyRecurring {
 		}
 		int removed = this.jdbc.update("DELETE FROM company_recurring_skips WHERE recurring_id = ? AND skip_date = ?",
 				id, Date.valueOf(date));
+		if (removed > 0) {
+			this.history.record(id, actor.getId(), CompanyRecurringHistory.UNSKIPPED,
+					CompanyRecurringHistory.date("skipDate", date, null), this.clock.instant());
+		}
 		boolean passed = row.nextDate() == null || row.nextDate().isAfter(date);
 		boolean inPause = row.paused() || (row.pausedUntil() != null && date.isBefore(row.pausedUntil()));
 		if (removed > 0 && passed && !inPause && !date.minusDays(row.lead()).isAfter(latestToday())) {
@@ -366,16 +402,92 @@ public class CompanyRecurring {
 	}
 
 	/**
-	 * Deletes the repeat expense and its reminders. Transactions saved from it stay.
+	 * Moves the repeat expense to the trash (user decision 2026-11-15): hidden from the list,
+	 * "Due soon" and the job; its waiting reminders are hidden too. Only the OWNER sees the
+	 * trash and restores. Transactions saved from it stay.
 	 * @throws ApiException 404 {@code recurring_not_found}
 	 */
 	@Transactional
 	public void delete(AuthUser principal, UUID id) {
-		editable(principal, id);
-		// Its reminders go with it, so their alerts go too (their links would be dead).
+		Editable editable = editable(principal, id);
+		Instant now = this.clock.instant();
+		// Its reminders are hidden, so their alerts go (their links would be dead). Not brought back on restore.
 		this.jdbc.update("DELETE FROM notifications n USING company_recurring_occurrences o WHERE o.recurring_id = ? "
 				+ "AND n.dedupe_key LIKE 'company-recurring:' || o.id || ':%'", id);
-		this.jdbc.update("DELETE FROM company_recurring WHERE id = ?", id);
+		this.jdbc.update("UPDATE company_recurring SET deleted_at = ?, deleted_by = ? WHERE id = ? AND deleted_at IS NULL",
+				Timestamp.from(now), editable.actor().getId(), id);
+		this.history.record(id, editable.actor().getId(), CompanyRecurringHistory.DELETED, List.of(), now);
+	}
+
+	// ---- the trash (OWNER) ----
+
+	/** The trash (OWNER), last trashed first. @throws ApiException 403 {@code forbidden} */
+	@Transactional(readOnly = true)
+	public List<TrashedRecurring> trashList(AuthUser principal) {
+		User owner = this.actors.owner(principal);
+		List<Object[]> trashed = new ArrayList<>();
+		List<Row> rows = this.jdbc.query("SELECT " + COLUMNS + ", created_at, deleted_at, deleted_by FROM company_recurring "
+				+ "WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id", (rs, n) -> {
+					trashed.add(new Object[] { rs.getTimestamp("created_at").toInstant(),
+							rs.getTimestamp("deleted_at").toInstant(), rs.getObject("deleted_by", UUID.class) });
+					return map(rs, n);
+				});
+		List<UUID> people = new ArrayList<>();
+		for (int i = 0; i < rows.size(); i++) {
+			people.add(rows.get(i).createdBy());
+			people.add((UUID) trashed.get(i)[2]);
+		}
+		Map<UUID, User> users = this.history.usersById(people);
+		Views views = views(rows, today(owner.getId()));
+		List<TrashedRecurring> result = new ArrayList<>();
+		for (int i = 0; i < rows.size(); i++) {
+			Row row = rows.get(i);
+			Object[] extra = trashed.get(i);
+			result.add(new TrashedRecurring(row.id(), row.type(), Totals.money(row.amount()), row.description(),
+					views.category(row), row.website(), views.logoUrls(row), row.unit(), row.every(), row.startDate(),
+					row.endDate(), row.paused(), row.pausedUntil(), row.remindDays(),
+					CompanyRecurringHistory.userRef(users, row.createdBy()), (Instant) extra[0], (Instant) extra[1],
+					CompanyRecurringHistory.userRef(users, (UUID) extra[2])));
+		}
+		return result;
+	}
+
+	/**
+	 * Takes a repeat out of the trash (OWNER), with all its settings. Like Resume, dates missed
+	 * while in the trash are not reminded. Not in the trash: no change.
+	 * @throws ApiException 403 {@code forbidden}, 404 {@code recurring_not_found}
+	 */
+	@Transactional
+	public Recurring restore(AuthUser principal, UUID id) {
+		User owner = this.actors.owner(principal);
+		Row row = anyRow(id);
+		Boolean trashed = this.jdbc.queryForObject("SELECT deleted_at IS NOT NULL FROM company_recurring WHERE id = ?",
+				Boolean.class, id);
+		if (Boolean.TRUE.equals(trashed)) {
+			Instant now = this.clock.instant();
+			Valid valid = new Valid(row.amount(), row.startDate(), row.endDate(), row.website());
+			LocalDate next = (row.nextDate() != null) ? firstFrom(valid, from(row, owner), row.unit(), row.every()) : null;
+			this.jdbc.update("UPDATE company_recurring SET deleted_at = NULL, deleted_by = NULL, next_date = ? WHERE id = ?",
+					date(next), id);
+			this.history.record(id, owner.getId(), CompanyRecurringHistory.RESTORED, List.of(), now);
+			runOne(id);
+		}
+		return one(id, owner);
+	}
+
+	/**
+	 * History, newest first. Everyone; a repeat in the trash: OWNER only.
+	 * @throws ApiException 404 {@code recurring_not_found}
+	 */
+	@Transactional(readOnly = true)
+	public List<HistoryEntry> history(AuthUser principal, UUID id) {
+		User user = this.actors.active(principal);
+		Boolean trashed = this.jdbc.query("SELECT deleted_at IS NOT NULL AS t FROM company_recurring WHERE id = ?",
+				(rs, n) -> rs.getBoolean("t"), id).stream().findFirst().orElseThrow(CompanyRecurring::notFound);
+		if (trashed && user.getRole() != Role.OWNER) {
+			throw notFound();
+		}
+		return this.history.list(id);
 	}
 
 	/**
@@ -396,6 +508,10 @@ public class CompanyRecurring {
 		}
 		this.jdbc.update("UPDATE company_recurring_occurrences SET status = 'SKIPPED', done_by = ?, done_at = ? "
 				+ "WHERE id = ?", actor.getId(), Timestamp.from(this.clock.instant()), occurrenceId);
+		LocalDate dueDate = this.jdbc.queryForObject("SELECT due_date FROM company_recurring_occurrences WHERE id = ?",
+				LocalDate.class, occurrenceId);
+		this.history.record(recurringId, actor.getId(), CompanyRecurringHistory.SKIPPED,
+				CompanyRecurringHistory.date("skipDate", null, dueDate), this.clock.instant());
 		markAlertsRead(occurrenceId);
 		return occurrences("o.id = ?", List.of(occurrenceId), today(actor.getId()), actor).get(0);
 	}
@@ -425,7 +541,8 @@ public class CompanyRecurring {
 	@Scheduled(initialDelayString = "PT2M", fixedDelayString = "PT1H")
 	public int runDue() {
 		List<UUID> due = this.jdbc.queryForList(
-				"SELECT id FROM company_recurring WHERE NOT paused AND next_date IS NOT NULL AND next_date - "
+				"SELECT id FROM company_recurring WHERE NOT paused AND deleted_at IS NULL AND next_date IS NOT NULL "
+						+ "AND next_date - "
 						+ "coalesce((SELECT max(d) FROM unnest(remind_days) d), 0) <= ?",
 				UUID.class, Date.valueOf(latestToday()));
 		int made = 0;
@@ -452,7 +569,8 @@ public class CompanyRecurring {
 	 * @return how many
 	 */
 	int runOne(UUID id) {
-		Row row = this.jdbc.query("SELECT " + COLUMNS + " FROM company_recurring WHERE id = ? FOR UPDATE",
+		Row row = this.jdbc.query("SELECT " + COLUMNS + " FROM company_recurring WHERE id = ? AND deleted_at IS NULL "
+				+ "FOR UPDATE",
 				CompanyRecurring::map, id).stream().findFirst().orElse(null);
 		if (row == null || row.paused() || row.nextDate() == null) {
 			return 0;
@@ -565,7 +683,8 @@ public class CompanyRecurring {
 	}
 
 	private void lockDue(UUID occurrenceId) {
-		String status = this.jdbc.query("SELECT status FROM company_recurring_occurrences WHERE id = ? FOR UPDATE",
+		String status = this.jdbc.query("SELECT status FROM company_recurring_occurrences o WHERE o.id = ? AND " + LIVE
+				+ " FOR UPDATE OF o",
 				(rs, row) -> rs.getString("status"), occurrenceId).stream().findFirst()
 			.orElseThrow(CompanyRecurring::occurrenceNotFound);
 		if (!"DUE".equals(status)) {
@@ -627,12 +746,41 @@ public class CompanyRecurring {
 		}
 	}
 
+	/** A repeat not in the trash. @throws ApiException 404 {@code recurring_not_found} */
 	private Row row(UUID id) {
+		return this.jdbc.query("SELECT " + COLUMNS + " FROM company_recurring WHERE id = ? AND deleted_at IS NULL",
+				CompanyRecurring::map, id)
+			.stream()
+			.findFirst()
+			.orElseThrow(CompanyRecurring::notFound);
+	}
+
+	/** A repeat, in the trash or not. @throws ApiException 404 {@code recurring_not_found} */
+	private Row anyRow(UUID id) {
 		return this.jdbc.query("SELECT " + COLUMNS + " FROM company_recurring WHERE id = ?", CompanyRecurring::map, id)
 			.stream()
 			.findFirst()
-			.orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "recurring_not_found",
-					"Repeat expense not found"));
+			.orElseThrow(CompanyRecurring::notFound);
+	}
+
+	private static ApiException notFound() {
+		return new ApiException(HttpStatus.NOT_FOUND, "recurring_not_found", "Repeat expense not found");
+	}
+
+	private CompanyRecurringHistory.Snapshot snapshot(Row row) {
+		return CompanyRecurringHistory.Snapshot.of(row.type(), row.amount(), row.description(), row.categoryId(),
+				categoryName(row.categoryId()), row.website(), row.unit(), row.every(), row.startDate(), row.endDate(),
+				row.remindDays());
+	}
+
+	private CompanyRecurringHistory.Snapshot snapshot(RecurringRequest request, Valid valid, List<Integer> remindDays) {
+		return CompanyRecurringHistory.Snapshot.of(request.type(), valid.amount(), request.description(),
+				request.categoryId(), categoryName(request.categoryId()), valid.website(), request.unit(),
+				request.every(), valid.start(), valid.end(), remindDays);
+	}
+
+	private String categoryName(UUID categoryId) {
+		return this.categories.findById(categoryId).map(Category::getName).orElse(null);
 	}
 
 	/** dueCount = the same reminders GET /api/recurring/due shows to this user (early ones too). */
@@ -812,6 +960,16 @@ public class CompanyRecurring {
 			CategoryRef category, String website, List<String> logoUrls, String unit, int every, LocalDate startDate,
 			LocalDate endDate, LocalDate nextDate, boolean paused, LocalDate pausedUntil, int dueCount,
 			List<Recurrence.Upcoming> upcoming, List<Integer> remindDays, boolean canEdit) {
+	}
+
+	/**
+	 * A repeat expense in the trash (OWNER): its settings plus who added it and when and by
+	 * whom it was trashed.
+	 */
+	public record TrashedRecurring(UUID id, String type, String amount, String description, CategoryRef category,
+			String website, List<String> logoUrls, String unit, int every, LocalDate startDate, LocalDate endDate,
+			boolean paused, LocalDate pausedUntil, List<Integer> remindDays, UserRef createdBy, Instant createdAt,
+			Instant deletedAt, UserRef deletedBy) {
 	}
 
 	/**

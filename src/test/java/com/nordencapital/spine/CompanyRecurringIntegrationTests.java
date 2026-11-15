@@ -85,11 +85,12 @@ class CompanyRecurringIntegrationTests extends IntegrationTestBase {
 		assertThat(again).bodyJson().extractingPath("$.error").isEqualTo("occurrence_not_due");
 		assertThat(count("transactions")).isEqualTo(1);
 
-		// Delete: reminders go, the transaction stays.
+		// Delete: to the trash (hidden, alerts go), the transaction stays.
 		String id = this.jdbc.queryForObject("SELECT id::text FROM company_recurring", String.class);
 		assertThat(e.delete("/api/admin/recurring/" + id)).hasStatus(HttpStatus.FORBIDDEN);
 		assertThat(b.delete("/api/admin/recurring/" + id)).hasStatus(HttpStatus.NO_CONTENT);
-		assertThat(count("company_recurring_occurrences")).isZero();
+		assertThat(b.get("/api/recurring")).bodyJson().extractingPath("$.length()").isEqualTo(0);
+		assertThat(b.get("/api/recurring/occurrences/" + occurrence)).hasStatus(HttpStatus.NOT_FOUND);
 		assertThat(count("transactions")).isEqualTo(1);
 		assertThat(alerts(boss) + alerts(other) + alerts(emp)).isZero();
 	}
@@ -261,7 +262,8 @@ class CompanyRecurringIntegrationTests extends IntegrationTestBase {
 			.isEqualTo(true);
 		assertThat(b.delete("/api/recurring/" + mine)).hasStatus(HttpStatus.NO_CONTENT);
 		assertThat(e.delete("/api/recurring/" + mine)).hasStatus(HttpStatus.NOT_FOUND);
-		assertThat(count("company_recurring")).isEqualTo(1);
+		assertThat(this.jdbc.queryForObject("SELECT count(*) FROM company_recurring WHERE deleted_at IS NULL",
+				Integer.class)).isEqualTo(1);
 	}
 
 	@Test

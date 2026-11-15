@@ -23,9 +23,11 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.nordencapital.spine.auth.AuthUser;
 import com.nordencapital.spine.common.ApiError;
+import com.nordencapital.spine.transaction.HistoryEntry;
 
 @Tag(name = "Repeat expenses", description = "Company repeat expenses: REMINDERS ONLY, nothing is created "
-		+ "automatically. Everyone reads and adds; only its creator or the OWNER changes one (403 forbidden). "
+		+ "automatically. Everyone reads, adds and changes any repeat. Delete moves it to the trash; only the OWNER "
+		+ "sees the trash and restores. "
 		+ "The old /api/admin/recurring paths still work for the OWNER.")
 @RestController
 public class CompanyRecurringController {
@@ -98,12 +100,40 @@ public class CompanyRecurringController {
 		return this.service.setPaused(actor, id, false);
 	}
 
-	@Operation(summary = "Delete a repeat expense", description = "Its reminders go too; saved transactions stay.")
-	@ApiResponse(responseCode = "204", description = "Deleted")
+	@Operation(summary = "Move a repeat expense to the trash", description = "Hidden from the list, Due soon and the "
+			+ "job; its waiting reminders are hidden and their alerts removed. Saved transactions stay. Only the OWNER "
+			+ "sees the trash and restores.")
+	@ApiResponse(responseCode = "204", description = "In the trash")
 	@DeleteMapping({ "/api/recurring/{id}", "/api/admin/recurring/{id}" })
 	public ResponseEntity<Void> delete(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id) {
 		this.service.delete(actor, id);
 		return ResponseEntity.noContent().build();
+	}
+
+	@Operation(summary = "History of a repeat expense", description = "Newest first. Same JSON as the transaction "
+			+ "history. Actions: CREATED, UPDATED, PAUSED, RESUMED, PAUSED_UNTIL, SKIPPED, UNSKIPPED, DELETED, RESTORED. "
+			+ "In the trash: OWNER only (else 404).")
+	@ApiResponse(responseCode = "404", description = "recurring_not_found",
+			content = @Content(schema = @Schema(implementation = ApiError.class)))
+	@GetMapping("/api/recurring/{id}/history")
+	public List<HistoryEntry> history(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id) {
+		return this.service.history(actor, id);
+	}
+
+	@Operation(summary = "The repeat trash (OWNER)", description = "Last trashed first.")
+	@GetMapping("/api/admin/recurring/trash")
+	public List<CompanyRecurring.TrashedRecurring> trashList(@AuthenticationPrincipal AuthUser actor) {
+		return this.service.trashList(actor);
+	}
+
+	@Operation(summary = "Restore a repeat from the trash (OWNER)",
+			description = "With all its settings. Dates missed while in the trash are not reminded.")
+	@ApiResponse(responseCode = "200", description = "Restored")
+	@ApiResponse(responseCode = "404", description = "recurring_not_found",
+			content = @Content(schema = @Schema(implementation = ApiError.class)))
+	@PostMapping("/api/admin/recurring/{id}/restore")
+	public CompanyRecurring.Recurring restore(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id) {
+		return this.service.restore(actor, id);
 	}
 
 	@Operation(summary = "Pause until a date", description = "No reminder before that date; then it goes on by "
