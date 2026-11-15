@@ -68,7 +68,9 @@ import com.nordencapital.spine.user.UserRepository;
 /**
  * Balances (company space): prepaid accounts a service takes money from on a schedule.
  * Spine does not know the real balance: it guesses it from the last start point (create,
- * recharge or fix) and the cut dates since. Everyone reads; only the OWNER changes.
+ * recharge or fix) and the cut dates since. Everyone active in the company (owner and
+ * members) reads, adds, edits, recharges, fixes and deletes (user decision 2026-11-15).
+ * Delete moves to the trash; only the OWNER sees the trash and restores.
  * "Today" is the company day, in Morocco time.
  */
 @Service
@@ -89,7 +91,7 @@ public class BalanceService {
 
 	private static final String COLUMNS = "id, name, website, category_id, cut, repeat_unit, repeat_every, anchor_date, "
 			+ "low_limit, warn_days, note, start_amount, start_date, start_seq, created_by, created_at, updated_by, "
-			+ "updated_at";
+			+ "updated_at, deleted_at, deleted_by";
 
 	private static final Logger logger = LoggerFactory.getLogger(BalanceService.class);
 
@@ -137,7 +139,8 @@ public class BalanceService {
 	@Transactional(readOnly = true)
 	public BalanceList list(AuthUser principal) {
 		User viewer = this.actors.active(principal);
-		List<Row> rows = this.jdbc.query("SELECT " + COLUMNS + " FROM balances", BalanceService::map);
+		List<Row> rows = this.jdbc.query("SELECT " + COLUMNS + " FROM balances WHERE deleted_at IS NULL",
+				BalanceService::map);
 		Views views = views(rows, viewer);
 		List<Balance> items = new ArrayList<>(rows.stream().map(views::balance).toList());
 		items.sort(URGENT_FIRST);
@@ -152,11 +155,18 @@ public class BalanceService {
 		return new BalanceList(new Summary(items.size(), Totals.money(perMonth), red + amber, red, amber), items);
 	}
 
-	/** @throws ApiException 404 {@code balance_not_found} */
+	/**
+	 * One balance with its history. In the trash: the OWNER only (members get 404, like
+	 * repeat expenses).
+	 * @throws ApiException 404 {@code balance_not_found}
+	 */
 	@Transactional(readOnly = true)
 	public BalanceDetail get(AuthUser principal, UUID id) {
 		User viewer = this.actors.active(principal);
-		Row row = row(id, false);
+		Row row = anyRow(id, false);
+		if (row.deletedAt() != null && viewer.getRole() != Role.OWNER) {
+			throw notFound();
+		}
 		List<EventRow> events = this.jdbc.query("SELECT id, kind, event_date, amount, guess_before, start_after, "
 				+ "transaction_id, user_id FROM balance_events WHERE balance_id = ? ORDER BY event_date, created_at, id",
 				(rs, n) -> new EventRow(rs.getString("kind"), rs.getDate("event_date").toLocalDate(),
@@ -170,36 +180,55 @@ public class BalanceService {
 	}
 
 	/**
-	 * Newest first: the events, and between them the cuts Spine guessed (grouped).
+	 * Newest first: the events, and between them the cuts Spine guessed (grouped). DELETED
+	 * and RESTORED lines are not a start point: the cuts go on across them (the guess goes
+	 * on while in the trash), split in two groups.
 	 */
 	private static List<HistoryItem> history(Row row, List<EventRow> events, LocalDate today, Views views) {
 		BalanceMath math = row.math();
 		List<HistoryItem> items = new ArrayList<>();
+		BigDecimal start = null;
+		LocalDate startDate = null;
 		for (int i = 0; i < events.size(); i++) {
 			EventRow e = events.get(i);
-			items.add(new HistoryItem(e.kind(), e.date(), Totals.money(e.amount()),
-					(e.guessBefore() != null) ? Totals.money(e.guessBefore()) : null, Totals.money(e.startAfter()),
-					e.transactionId(), views.user(e.userId()), null, null, null, null, null));
+			boolean startPoint = e.startAfter() != null;
+			if (startPoint) {
+				start = e.startAfter();
+				startDate = e.date();
+			}
+			items.add(new HistoryItem(e.kind(), e.date(), money(e.amount()), money(e.guessBefore()),
+					money(e.startAfter()), e.transactionId(), views.user(e.userId()), null, null, null, null, null));
+			if (start == null) {
+				continue;
+			}
 			LocalDate to = (i + 1 < events.size()) ? events.get(i + 1).date() : today;
 			long count = math.cutsBetween(e.date(), to);
 			if (count > 0) {
-				LocalDate first = math.nextCutAfter(e.date());
-				LocalDate last = math.cut(math.firstAfter(to) - 1);
-				BigDecimal total = row.cut().multiply(BigDecimal.valueOf(count)).min(e.startAfter());
-				items.add(new HistoryItem("CUTS", last, null, null, null, null, null, count, first, last,
-						Totals.money(row.cut()), Totals.money(total)));
+				// Never more than what was left (= cut × count, capped at the guess then).
+				BigDecimal total = math.guess(start, startDate, row.cut(), e.date())
+					.subtract(math.guess(start, startDate, row.cut(), to));
+				if (startPoint || total.signum() > 0) {
+					LocalDate first = math.nextCutAfter(e.date());
+					LocalDate last = math.cut(math.firstAfter(to) - 1);
+					items.add(new HistoryItem("CUTS", last, null, null, null, null, null, count, first, last,
+							Totals.money(row.cut()), Totals.money(total)));
+				}
 			}
 		}
 		Collections.reverse(items);
 		return items;
 	}
 
-	// ---- changes (OWNER) ----
+	private static String money(BigDecimal value) {
+		return (value != null) ? Totals.money(value) : null;
+	}
+
+	// ---- changes (everyone active in the company) ----
 
 	/** @throws ApiException 400 {@code validation_error} */
 	@Transactional
 	public BalanceDetail create(AuthUser principal, BalanceRequest request) {
-		User actor = this.actors.owner(principal);
+		User actor = this.actors.active(principal);
 		LocalDate today = today();
 		Valid valid = check(request, null, today);
 		if (request.startAmount() == null) {
@@ -228,7 +257,7 @@ public class BalanceService {
 	 */
 	@Transactional
 	public BalanceDetail update(AuthUser principal, UUID id, BalanceRequest request) {
-		User actor = this.actors.owner(principal);
+		User actor = this.actors.active(principal);
 		Row row = row(id, true);
 		LocalDate today = today();
 		Valid valid = check(request, row, today);
@@ -252,15 +281,53 @@ public class BalanceService {
 	}
 
 	/**
-	 * Deletes the balance, its history and its alerts. The recharge expenses stay.
-	 * @throws ApiException 404 {@code balance_not_found}
+	 * Moves the balance to the trash (user decision 2026-11-15): hidden from the list, the
+	 * dashboard card, the job and the alerts; its alerts go. Anyone in the company; only the
+	 * OWNER sees the trash and restores. Its history and the recharge expenses stay.
+	 * @throws ApiException 404 {@code balance_not_found} (also when already in the trash)
 	 */
 	@Transactional
 	public void delete(AuthUser principal, UUID id) {
-		this.actors.owner(principal);
-		row(id, true);
+		User actor = this.actors.active(principal);
+		Row row = row(id, true);
+		LocalDate today = today();
 		this.jdbc.update("DELETE FROM notifications WHERE dedupe_key LIKE ?", "balance:" + id + ":%");
-		this.jdbc.update("DELETE FROM balances WHERE id = ?", id);
+		this.jdbc.update("UPDATE balances SET deleted_at = ?, deleted_by = ? WHERE id = ? AND deleted_at IS NULL",
+				Timestamp.from(this.clock.instant()), actor.getId(), id);
+		event(id, "DELETED", today, null, row.math().guess(row.startAmount(), row.startDate(), row.cut(), today), null,
+				null, actor.getId());
+	}
+
+	// ---- the trash (OWNER) ----
+
+	/** The trash (OWNER), last trashed first. @throws ApiException 403 {@code forbidden} */
+	@Transactional(readOnly = true)
+	public List<Balance> trashList(AuthUser principal) {
+		User owner = this.actors.owner(principal);
+		List<Row> rows = this.jdbc.query(
+				"SELECT " + COLUMNS + " FROM balances WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id",
+				BalanceService::map);
+		Views views = views(rows, owner);
+		return rows.stream().map(views::balance).toList();
+	}
+
+	/**
+	 * Takes a balance out of the trash (OWNER), with its settings and history. The guess goes
+	 * on from its start point (the cuts while in the trash count). Not in the trash: no change.
+	 * @throws ApiException 403 {@code forbidden}, 404 {@code balance_not_found}
+	 */
+	@Transactional
+	public BalanceDetail restore(AuthUser principal, UUID id) {
+		User owner = this.actors.owner(principal);
+		Row row = anyRow(id, true);
+		if (row.deletedAt() != null) {
+			LocalDate today = today();
+			this.jdbc.update("UPDATE balances SET deleted_at = NULL, deleted_by = NULL WHERE id = ?", id);
+			event(id, "RESTORED", today, null, row.math().guess(row.startAmount(), row.startDate(), row.cut(), today),
+					null, null, owner.getId());
+			checkAlerts(id);
+		}
+		return get(principal, id);
 	}
 
 	/**
@@ -272,7 +339,7 @@ public class BalanceService {
 	 */
 	@Transactional
 	public BalanceDetail recharge(AuthUser principal, UUID id, RechargeRequest request) {
-		User actor = this.actors.owner(principal);
+		User actor = this.actors.active(principal);
 		Row row = row(id, true);
 		BigDecimal amount = Money.parse("amount", request.amount());
 		LocalDate date = Recurrence.parseDate(request.date());
@@ -303,7 +370,7 @@ public class BalanceService {
 	 */
 	@Transactional
 	public BalanceDetail fix(AuthUser principal, UUID id, FixRequest request) {
-		User actor = this.actors.owner(principal);
+		User actor = this.actors.active(principal);
 		Row row = row(id, true);
 		BigDecimal amount = moneyOrZero("amount", request.amount());
 		LocalDate today = today();
@@ -339,7 +406,7 @@ public class BalanceService {
 	 */
 	@Scheduled(initialDelayString = "PT3M", fixedDelayString = "PT1H")
 	public void runAlerts() {
-		for (UUID id : this.jdbc.queryForList("SELECT id FROM balances", UUID.class)) {
+		for (UUID id : this.jdbc.queryForList("SELECT id FROM balances WHERE deleted_at IS NULL", UUID.class)) {
 			try {
 				this.transaction.executeWithoutResult((status) -> checkAlerts(id));
 			}
@@ -351,11 +418,12 @@ public class BalanceService {
 
 	/**
 	 * COMPANY alerts to everyone: BALANCE_EMPTY (guess is $0), else BALANCE_LOW (under the
-	 * low limit) and BALANCE_SOON (empty within the warn days).
+	 * low limit) and BALANCE_SOON (empty within the warn days). None for a balance in the trash.
 	 * @return how many alerts were added (all people)
 	 */
 	int checkAlerts(UUID id) {
-		Row row = this.jdbc.query("SELECT " + COLUMNS + " FROM balances WHERE id = ?", BalanceService::map, id)
+		Row row = this.jdbc
+			.query("SELECT " + COLUMNS + " FROM balances WHERE id = ? AND deleted_at IS NULL", BalanceService::map, id)
 			.stream()
 			.findFirst()
 			.orElse(null);
@@ -469,12 +537,26 @@ public class BalanceService {
 		return Money.parse(field, text);
 	}
 
+	/** A balance not in the trash. @throws ApiException 404 {@code balance_not_found} */
 	private Row row(UUID id, boolean lock) {
+		Row row = anyRow(id, lock);
+		if (row.deletedAt() != null) {
+			throw notFound();
+		}
+		return row;
+	}
+
+	/** A balance, in the trash or not. @throws ApiException 404 {@code balance_not_found} */
+	private Row anyRow(UUID id, boolean lock) {
 		return this.jdbc.query("SELECT " + COLUMNS + " FROM balances WHERE id = ?" + (lock ? " FOR UPDATE" : ""),
 				BalanceService::map, id)
 			.stream()
 			.findFirst()
-			.orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "balance_not_found", "Balance not found"));
+			.orElseThrow(BalanceService::notFound);
+	}
+
+	private static ApiException notFound() {
+		return new ApiException(HttpStatus.NOT_FOUND, "balance_not_found", "Balance not found");
 	}
 
 	private Views views(List<Row> rows, User viewer) {
@@ -496,11 +578,13 @@ public class BalanceService {
 		rows.forEach((row) -> {
 			userIds.add(row.createdBy());
 			userIds.add(row.updatedBy());
+			userIds.add(row.deletedBy());
 		});
 		userIds.remove(null);
 		Map<UUID, User> people = new HashMap<>();
 		this.users.findAllById(userIds).forEach((u) -> people.put(u.getId(), u));
-		return new Views(byId, this.logos.logoUrls(domains), people, viewer.getRole() == Role.OWNER, today());
+		// Everyone active in the company may change any balance (actors.active checked the viewer).
+		return new Views(byId, this.logos.logoUrls(domains), people, true, today());
 	}
 
 	private static ApiException invalid(String message) {
@@ -514,7 +598,9 @@ public class BalanceService {
 				rs.getInt("warn_days"), rs.getString("note"), rs.getBigDecimal("start_amount"),
 				rs.getDate("start_date").toLocalDate(), rs.getInt("start_seq"), rs.getObject("created_by", UUID.class),
 				rs.getTimestamp("created_at").toInstant(), rs.getObject("updated_by", UUID.class),
-				rs.getTimestamp("updated_at").toInstant());
+				rs.getTimestamp("updated_at").toInstant(),
+				(rs.getTimestamp("deleted_at") != null) ? rs.getTimestamp("deleted_at").toInstant() : null,
+				rs.getObject("deleted_by", UUID.class));
 	}
 
 	private static final Map<String, Integer> URGENCY_ORDER = Map.of("RED", 0, "AMBER", 1, "GREEN", 2);
@@ -527,7 +613,8 @@ public class BalanceService {
 
 	record Row(UUID id, String name, String website, UUID categoryId, BigDecimal cut, String unit, int every,
 			LocalDate anchor, BigDecimal lowLimit, int warnDays, String note, BigDecimal startAmount,
-			LocalDate startDate, int startSeq, UUID createdBy, Instant createdAt, UUID updatedBy, Instant updatedAt) {
+			LocalDate startDate, int startSeq, UUID createdBy, Instant createdAt, UUID updatedBy, Instant updatedAt,
+			Instant deletedAt, UUID deletedBy) {
 
 		BalanceMath math() {
 			return new BalanceMath(this.unit, this.every, this.anchor);
@@ -582,7 +669,7 @@ public class BalanceService {
 					Totals.money(row.startAmount()), row.startDate(), Totals.money(s.guess()), s.percent(),
 					Totals.money(s.perMonth()), s.emptyDate(), s.daysLeft(), s.guess().signum() <= 0,
 					s.belowLimitDate(), s.urgency(), user(row.createdBy()), row.createdAt(), user(row.updatedBy()),
-					row.updatedAt(), this.canEdit);
+					row.updatedAt(), this.canEdit, row.deletedAt(), user(row.deletedBy()));
 		}
 
 	}

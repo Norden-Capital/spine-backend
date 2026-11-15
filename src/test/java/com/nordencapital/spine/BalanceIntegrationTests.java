@@ -18,7 +18,7 @@ import com.nordencapital.spine.user.User;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Balances: the OWNER changes, members read (403 on every write), the guess from the
+ * Balances: everyone in the company adds, edits, recharges and fixes; the guess from the
  * start point, recharge (one expense, proof required), fix, alerts to everyone (once per
  * start point) and the alert scope.
  */
@@ -33,14 +33,15 @@ class BalanceIntegrationTests extends IntegrationTestBase {
 	private AlertService alertService;
 
 	@Test
-	void ownerChangesMembersOnlyRead() {
+	void everyoneAddsEditsRechargesAndFixes() {
 		activeUser("boss@example.com", Role.OWNER);
 		activeUser("emp@example.com", Role.MEMBER);
 		Client b = loggedIn("boss@example.com");
 		Client e = loggedIn("emp@example.com");
 
+		// A member adds one (the admin path stays OWNER only).
 		assertThat(e.post("/api/admin/balances", body("Twilio", "DAY", 1, null))).hasStatus(HttpStatus.FORBIDDEN);
-		MvcTestResult created = b.post("/api/admin/balances", body("Twilio", "DAY", 1, null));
+		MvcTestResult created = e.post("/api/balances", body("Twilio", "DAY", 1, null));
 		assertThat(created).hasStatus(HttpStatus.CREATED);
 		assertThat(created).bodyJson().extractingPath("$.balance.name").isEqualTo("Twilio");
 		assertThat(created).bodyJson().extractingPath("$.balance.website").isEqualTo("twilio.com");
@@ -57,43 +58,56 @@ class BalanceIntegrationTests extends IntegrationTestBase {
 		assertThat(created).bodyJson().extractingPath("$.balance.lowFrom").isEqualTo(TODAY.plusDays(9).toString());
 		assertThat(created).bodyJson().extractingPath("$.balance.urgency").isEqualTo("GREEN");
 		assertThat(created).bodyJson().extractingPath("$.balance.canEdit").isEqualTo(true);
+		assertThat(created).bodyJson().extractingPath("$.balance.deletedAt").isNull();
 		assertThat(created).bodyJson().extractingPath("$.history[0].type").isEqualTo("CREATED");
 		assertThat(created).bodyJson().extractingPath("$.history[0].amount").isEqualTo("80.00");
+		assertThat(created).bodyJson().extractingPath("$.history[0].by.name").isNotNull();
 		String id = id();
 
-		// Members read, with canEdit false.
-		assertThat(e.get("/api/balances")).hasStatusOk();
-		assertThat(e.get("/api/balances")).bodyJson().extractingPath("$.items[0].canEdit").isEqualTo(false);
-		assertThat(e.get("/api/balances/" + id)).bodyJson().extractingPath("$.balance.name").isEqualTo("Twilio");
+		// Everyone reads, with canEdit true.
+		for (Client c : List.of(b, e)) {
+			assertThat(c.get("/api/balances")).bodyJson().extractingPath("$.items[0].canEdit").isEqualTo(true);
+			assertThat(c.get("/api/balances/" + id)).bodyJson().extractingPath("$.balance.name").isEqualTo("Twilio");
+		}
 
-		// Every write is 403 for a member.
-		String file = FilesIntegrationTests.uploadedId(e.upload("r.pdf", "application/pdf", TestFiles.PDF));
-		assertThat(e.put("/api/admin/balances/" + id, body("X", "DAY", 1, null))).hasStatus(HttpStatus.FORBIDDEN);
-		assertThat(e.post("/api/admin/balances/" + id + "/recharge", recharge("10", TODAY, file, null)))
-			.hasStatus(HttpStatus.FORBIDDEN);
-		assertThat(e.post("/api/admin/balances/" + id + "/fix", "{\"amount\":\"5\"}")).hasStatus(HttpStatus.FORBIDDEN);
-		assertThat(e.delete("/api/admin/balances/" + id)).hasStatus(HttpStatus.FORBIDDEN);
-		assertThat(count("transactions")).isZero();
-
-		// Edit: 8 times a month.
-		MvcTestResult edited = b.put("/api/admin/balances/" + id, body("Twilio SMS", "TIMES_A_MONTH", 8, null));
+		// A member edits: 8 times a month.
+		MvcTestResult edited = e.put("/api/balances/" + id, body("Twilio SMS", "TIMES_A_MONTH", 8, null));
 		assertThat(edited).hasStatusOk();
 		assertThat(edited).bodyJson().extractingPath("$.balance.name").isEqualTo("Twilio SMS");
 		assertThat(edited).bodyJson().extractingPath("$.balance.perMonth").isEqualTo("51.20");
 		assertThat(edited).bodyJson().extractingPath("$.balance.startAmount").isEqualTo("80.00");
 
+		// A member recharges (one company expense by the member, proof required) and fixes.
+		String file = FilesIntegrationTests.uploadedId(e.upload("r.pdf", "application/pdf", TestFiles.PDF));
+		assertThat(e.post("/api/balances/" + id + "/recharge",
+				"{\"amount\":\"10\",\"date\":\"" + TODAY + "\",\"fileIds\":[]}"))
+			.hasStatus(HttpStatus.BAD_REQUEST);
+		MvcTestResult recharged = e.post("/api/balances/" + id + "/recharge", recharge("10", TODAY, file, null));
+		assertThat(recharged).hasStatusOk();
+		assertThat(recharged).bodyJson().extractingPath("$.history[0].type").isEqualTo("RECHARGE");
+		assertThat(recharged).bodyJson().extractingPath("$.balance.startAmount").isEqualTo("90.00");
+		assertThat(this.jdbc.queryForObject("SELECT count(*) FROM transactions t JOIN users u ON u.id = t.created_by "
+				+ "WHERE u.email = 'emp@example.com' AND t.description = 'Twilio SMS recharge'", Integer.class))
+			.isEqualTo(1);
+		MvcTestResult fixed = e.post("/api/balances/" + id + "/fix", "{\"amount\":\"5\"}");
+		assertThat(fixed).hasStatusOk();
+		assertThat(fixed).bodyJson().extractingPath("$.balance.guess").isEqualTo("5.00");
+		assertThat(fixed).bodyJson().extractingPath("$.history[0].type").isEqualTo("FIX");
+
+		// The owner still uses the admin paths (aliases).
+		assertThat(b.post("/api/admin/balances/" + id + "/fix", "{\"amount\":\"6\"}")).hasStatusOk();
+		assertThat(b.put("/api/admin/balances/" + id, body("Twilio SMS", "TIMES_A_MONTH", 8, null))).hasStatusOk();
+
 		// Bad input.
-		assertThat(b.post("/api/admin/balances", body("Bad", "TIMES_A_MONTH", 40, null)))
-			.hasStatus(HttpStatus.BAD_REQUEST);
-		assertThat(b.post("/api/admin/balances", body("Bad", "DAY", 1, TODAY.toString())))
-			.hasStatus(HttpStatus.BAD_REQUEST);
-		assertThat(b.post("/api/admin/balances", body("Bad", "DAY", 1, null).replace("\"80\"", "\"-1\"")))
+		assertThat(e.post("/api/balances", body("Bad", "TIMES_A_MONTH", 40, null))).hasStatus(HttpStatus.BAD_REQUEST);
+		assertThat(e.post("/api/balances", body("Bad", "DAY", 1, TODAY.toString()))).hasStatus(HttpStatus.BAD_REQUEST);
+		assertThat(e.post("/api/balances", body("Bad", "DAY", 1, null).replace("\"80\"", "\"-1\"")))
 			.hasStatus(HttpStatus.BAD_REQUEST);
 
-		// Delete: gone with its alerts.
-		assertThat(b.delete("/api/admin/balances/" + id)).hasStatus(HttpStatus.NO_CONTENT);
-		assertThat(b.get("/api/balances/" + id)).hasStatus(HttpStatus.NOT_FOUND);
-		assertThat(count("balance_events")).isZero();
+		// A member deletes: it goes to the trash (see BalanceTrashIntegrationTests).
+		assertThat(e.delete("/api/balances/" + id)).hasStatus(HttpStatus.NO_CONTENT);
+		assertThat(e.get("/api/balances/" + id)).hasStatus(HttpStatus.NOT_FOUND);
+		assertThat(count("balances")).isEqualTo(1);
 	}
 
 	@Test

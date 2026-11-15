@@ -16,7 +16,7 @@ import com.nordencapital.spine.common.Websites;
 import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
 import com.nordencapital.spine.transaction.TransactionResponse.UserRef;
 
-/** The JSON of /api/balances and /api/admin/balances. */
+/** The JSON of /api/balances (everyone) and /api/admin/balances (OWNER aliases, trash). */
 public final class BalanceApi {
 
 	private BalanceApi() {
@@ -35,13 +35,15 @@ public final class BalanceApi {
 	 * @param lowFrom the first date the guess is under lowLimit (null without a limit)
 	 * @param urgency RED (empty or under the limit), AMBER (empty within warnDays, or the next cut goes under
 	 * the limit), GREEN
-	 * @param canEdit true for the OWNER
+	 * @param canEdit true for everyone active in the company (owner and members)
+	 * @param deletedAt when it was moved to the trash; null = not in the trash (only the OWNER sees trashed ones)
+	 * @param deletedBy who moved it to the trash; null = not in the trash
 	 */
 	public record Balance(UUID id, String name, String website, List<String> logoUrls, CategoryRef category,
 			String cut, String unit, int every, LocalDate nextCut, String lowLimit, int warnDays, String note,
 			String startAmount, LocalDate startDate, String guess, int percent, String perMonth, LocalDate emptyDate,
 			Long daysLeft, boolean empty, LocalDate lowFrom, String urgency, UserRef createdBy, Instant createdAt,
-			UserRef updatedBy, Instant updatedAt, boolean canEdit) {
+			UserRef updatedBy, Instant updatedAt, boolean canEdit, Instant deletedAt, UserRef deletedBy) {
 	}
 
 	/**
@@ -63,15 +65,16 @@ public final class BalanceApi {
 	 * A history line. CREATED / RECHARGE / FIX: amount (start amount, money added, real balance typed),
 	 * guessBefore (RECHARGE, FIX), startAfter, by; RECHARGE also transactionId (the expense). CUTS: the cuts
 	 * Spine guessed between two events (or up to today): count, from / to (first and last cut date), each,
-	 * total (never more than the start amount).
-	 * @param type CREATED, RECHARGE, FIX or CUTS
+	 * total (never more than the start amount). DELETED / RESTORED (moved to / out of the trash): by,
+	 * guessBefore (the guess then); no amount, no startAfter (not a start point).
+	 * @param type CREATED, RECHARGE, FIX, DELETED, RESTORED or CUTS
 	 * @param date the event date (CUTS: the last cut date)
 	 */
 	public record HistoryItem(String type, LocalDate date, String amount, String guessBefore, String startAfter,
 			UUID transactionId, UserRef by, Long count, LocalDate from, LocalDate to, String each, String total) {
 	}
 
-	/** Body of POST and PUT /api/admin/balances. Text is trimmed. */
+	/** Body of POST and PUT /api/balances. Text is trimmed. */
 	public record BalanceRequest(
 			@NotBlank @Size(max = 60) @Pattern(regexp = Names.NO_CONTROL_CHARS,
 					message = "must not contain control characters") String name,
@@ -99,7 +102,7 @@ public final class BalanceApi {
 
 	}
 
-	/** Body of POST /api/admin/balances/{id}/recharge. */
+	/** Body of POST /api/balances/{id}/recharge. */
 	public record RechargeRequest(
 			@Schema(description = "Money added, e.g. \"50.00\"") @NotNull String amount,
 			@Schema(description = "YYYY-MM-DD, not in the future, not before the last recharge or fix") @NotNull
@@ -109,7 +112,7 @@ public final class BalanceApi {
 			@Size(max = 500) String note) {
 	}
 
-	/** Body of POST /api/admin/balances/{id}/fix. */
+	/** Body of POST /api/balances/{id}/fix. */
 	public record FixRequest(@Schema(description = "The real balance now, 0 or more") @NotNull String amount) {
 	}
 
