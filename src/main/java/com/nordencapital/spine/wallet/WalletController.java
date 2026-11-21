@@ -295,7 +295,21 @@ public class WalletController {
 		return this.budgets.reorder(me(actor, request).getId(), body.ids());
 	}
 
-	@Operation(summary = "Change a budget", description = "currency left out = keep.")
+	@Operation(summary = "A budget's past months", description = "budget = same as one item of the list (this "
+			+ "month). months = past months only, newest first, at most 12, from the first month with an expense in "
+			+ "the budget's scope (empty months after it have spent 0.00). Each month: spent converted into that "
+			+ "month's currency with my current rate (goal money does not count), and the limit that month had (the "
+			+ "one set in that month or the last one before it; months before the first saved limit use the first "
+			+ "one). summary = over the newest up-to-6 months (average HALF_UP, underLimit = spent <= limit, "
+			+ "biggest = most spent); null when months is empty. 404 budget_not_found.")
+	@GetMapping("/api/wallet/budgets/{id}/history")
+	public WalletBudgets.History budgetHistory(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
+			HttpServletRequest request) {
+		return this.budgets.history(me(actor, request).getId(), id);
+	}
+
+	@Operation(summary = "Change a budget", description = "currency left out = keep. Saves this month's limit; "
+			+ "earlier months keep theirs.")
 	@PutMapping("/api/wallet/budgets/{id}")
 	public WalletBudgets.Budget updateBudget(@AuthenticationPrincipal AuthUser actor, @PathVariable UUID id,
 			@Valid @RequestBody WalletBudgets.BudgetRequest body, HttpServletRequest request) {

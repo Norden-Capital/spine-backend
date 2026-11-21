@@ -29,6 +29,8 @@ class WalletIntegrationTests extends IntegrationTestBase {
 
 	private static final LocalDate TODAY = LocalDate.now(ZoneOffset.UTC);
 
+	private static final YearMonth MONTH = YearMonth.from(TODAY);
+
 	@Autowired
 	private WalletRecurring recurringJob;
 
@@ -293,6 +295,89 @@ class WalletIntegrationTests extends IntegrationTestBase {
 			.containsExactly("EXCEEDED");
 		assertThat(alertKinds(a)).containsExactlyInAnyOrder("BUDGET_80", "BUDGET_100");
 		assertThat(a.get("/api/alerts").getResponse().getContentAsString()).doesNotContain("85.00").doesNotContain("100.00");
+	}
+
+	// ---- budget history ----
+
+	@Test
+	void budgetHistoryKeepsEachMonthsLimitAndCountsSubcategories() {
+		activeUser("ada@example.com", Role.MEMBER);
+		activeUser("bob@example.com", Role.MEMBER);
+		Client a = wallet("ada@example.com");
+		String food = walletCategoryId(a, "Food");
+		a.post("/api/wallet/categories", "{\"name\":\"Restaurants\",\"icon\":\"utensils\",\"parentId\":\"" + food + "\"}");
+		String restaurants = walletCategoryId(a, "Restaurants");
+		String budget = created(a.post("/api/wallet/budgets", "{\"limit\":\"100\",\"categoryId\":\"" + food + "\"}"));
+
+		// Set 3 months ago (100), changed last month (150), changed again this month (200).
+		this.jdbc.update("UPDATE wallet_budget_limits SET month = (month - interval '3 months')::date");
+		a.put("/api/wallet/budgets/" + budget, "{\"limit\":\"150\",\"categoryId\":\"" + food + "\"}");
+		this.jdbc.update("UPDATE wallet_budget_limits SET month = (month - interval '1 month')::date WHERE month = ?",
+				java.sql.Date.valueOf(MONTH.atDay(1)));
+		a.put("/api/wallet/budgets/" + budget, "{\"limit\":\"200\",\"categoryId\":\"" + food + "\"}");
+		assertThat(this.jdbc.queryForList("SELECT amount::text FROM wallet_budget_limits ORDER BY month", String.class))
+			.containsExactly("100.00", "150.00", "200.00");
+
+		addWalletOn(a, "120.00", restaurants, MONTH.minusMonths(4), "Old dinner");
+		addWalletOn(a, "90.00", food, MONTH.minusMonths(2), "Market");
+		addWalletOn(a, "60.00", food, MONTH.minusMonths(1), "Snacks");
+		addWalletOn(a, "500.00", walletCategoryId(a, "Bills"), MONTH.minusMonths(1), "Rent");
+		addWallet(a, "EXPENSE", "10.00", food, "Gum");
+
+		MvcTestResult history = a.get("/api/wallet/budgets/" + budget + "/history");
+		assertThat(history).hasStatus(HttpStatus.OK);
+		assertThat(history).bodyJson().extractingPath("$.budget.limit").isEqualTo("200.00");
+		assertThat(history).bodyJson().extractingPath("$.budget.spent").isEqualTo("10.00");
+		// Newest first; months before the first saved limit use the first one; empty month kept.
+		assertThat(body(history)).contains("\"months\":["
+				+ month(MONTH.minusMonths(1), "60.00", "150.00", 40, "OK") + ","
+				+ month(MONTH.minusMonths(2), "90.00", "100.00", 90, "WARNING") + ","
+				+ month(MONTH.minusMonths(3), "0.00", "100.00", 0, "OK") + ","
+				+ month(MONTH.minusMonths(4), "120.00", "100.00", 120, "EXCEEDED") + "]");
+		assertThat(body(history)).endsWith("\"summary\":{\"months\":4,\"average\":\"67.50\","
+				+ "\"underLimit\":3,\"biggest\":{\"month\":\"" + MONTH.minusMonths(4) + "\",\"spent\":\"120.00\"}}}");
+
+		Client b = wallet("bob@example.com");
+		assertError(b.get("/api/wallet/budgets/" + budget + "/history"), HttpStatus.NOT_FOUND, "budget_not_found");
+		assertError(a.get("/api/wallet/budgets/" + java.util.UUID.randomUUID() + "/history"), HttpStatus.NOT_FOUND,
+				"budget_not_found");
+	}
+
+	@Test
+	void budgetHistoryIgnoresGoalsAndKeepsAtMostTwelveMonths() {
+		activeUser("ada@example.com", Role.MEMBER);
+		Client a = wallet("ada@example.com");
+		String total = created(a.post("/api/wallet/budgets", "{\"limit\":\"1000\"}"));
+		String bills = created(a.post("/api/wallet/budgets",
+				"{\"limit\":\"300\",\"categoryId\":\"" + walletCategoryId(a, "Bills") + "\"}"));
+		String food = walletCategoryId(a, "Food");
+		String goal = created(a.post("/api/wallet/goals", "{\"name\":\"Trip\",\"target\":\"5000\"}"));
+		assertThat(a.post("/api/wallet/goals/" + goal + "/contributions",
+				"{\"amount\":\"700\",\"date\":\"" + MONTH.minusMonths(1).atDay(5) + "\"}"))
+			.hasStatus(HttpStatus.CREATED);
+		addWalletOn(a, "50.00", food, MONTH.minusMonths(1), "Lunch");
+		// Older than 12 past months: not shown, so it does not start the list either.
+		addWalletOn(a, "40.00", food, MONTH.minusMonths(13), "Very old");
+
+		MvcTestResult history = a.get("/api/wallet/budgets/" + total + "/history");
+		assertThat(body(history)).contains(
+				"\"months\":[" + month(MONTH.minusMonths(1), "50.00", "1000.00", 5, "OK") + "],");
+		assertThat(history).bodyJson().extractingPath("$.summary.average").isEqualTo("50.00");
+		assertThat(history).bodyJson().extractingPath("$.summary.underLimit").isEqualTo(1);
+
+		// No spending before this month in its scope: no months, no summary.
+		MvcTestResult empty = a.get("/api/wallet/budgets/" + bills + "/history");
+		assertThat(body(empty)).endsWith("\"months\":[],\"summary\":null}");
+
+		// Spending in each of the last 14 months: 12 shown, newest first.
+		for (int i = 1; i <= 14; i++) {
+			addWalletOn(a, "10.00", food, MONTH.minusMonths(i), "Month " + i);
+		}
+		MvcTestResult full = a.get("/api/wallet/budgets/" + total + "/history");
+		assertThat(full).bodyJson().extractingPath("$.months.length()").isEqualTo(12);
+		assertThat(full).bodyJson().extractingPath("$.months[0].month").isEqualTo(MONTH.minusMonths(1).toString());
+		assertThat(full).bodyJson().extractingPath("$.months[11].month").isEqualTo(MONTH.minusMonths(12).toString());
+		assertThat(full).bodyJson().extractingPath("$.summary.months").isEqualTo(6);
 	}
 
 	// ---- goals ----
@@ -569,6 +654,27 @@ class WalletIntegrationTests extends IntegrationTestBase {
 		assertThat(client.post("/api/wallet/transactions", TransactionsIntegrationTests.confirmed(
 				walletBody(type, amount, TODAY.toString(), description, category, List.of()))))
 			.hasStatus(HttpStatus.CREATED);
+	}
+
+	/** An expense on the 10th of {@code month}. */
+	private void addWalletOn(Client client, String amount, String category, YearMonth month, String description) {
+		assertThat(client.post("/api/wallet/transactions", TransactionsIntegrationTests.confirmed(
+				walletBody("EXPENSE", amount, month.atDay(10).toString(), description, category, List.of()))))
+			.hasStatus(HttpStatus.CREATED);
+	}
+
+	private static String body(MvcTestResult result) {
+		try {
+			return result.getResponse().getContentAsString();
+		}
+		catch (java.io.UnsupportedEncodingException ex) {
+			throw new IllegalStateException(ex);
+		}
+	}
+
+	private static String month(YearMonth month, String spent, String limit, int percent, String status) {
+		return "{\"month\":\"" + month + "\",\"spent\":\"" + spent + "\",\"limit\":\"" + limit
+				+ "\",\"currency\":\"USD\",\"percent\":" + percent + ",\"status\":\"" + status + "\"}";
 	}
 
 	private int walletCount(String description) {

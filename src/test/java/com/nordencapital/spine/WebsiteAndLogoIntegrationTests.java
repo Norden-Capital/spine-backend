@@ -24,7 +24,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Optional website on company and wallet transactions and categories, and the logo URLs
- * the browser tries (declared icon, /apple-touch-icon.png, /favicon.ico), with a fake
+ * the browser tries (declared icon, /apple-touch-icon.png, /favicon.ico, Google), with a fake
  * page reader: no network.
  */
 class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
@@ -266,7 +266,8 @@ class WebsiteAndLogoIntegrationTests extends IntegrationTestBase {
 	}
 
 	private static List<String> fallbacks(String domain) {
-		return List.of("https://" + domain + "/apple-touch-icon.png", "https://" + domain + "/favicon.ico");
+		return List.of("https://" + domain + "/apple-touch-icon.png", "https://" + domain + "/favicon.ico",
+				"https://www.google.com/s2/favicons?domain=" + domain + "&sz=128");
 	}
 
 	/** Declared icon, then the two standard places. */

@@ -29,7 +29,9 @@ import com.nordencapital.spine.transaction.TransactionResponse.CategoryRef;
  * Monthly budgets: a limit in the budget's own currency (USD or MAD), either for everything
  * (no category) or for one category and its subcategories. "Spent" = this month's expenses
  * converted into the budget's currency with my rate. Alerts at 80% and 100%, once per budget
- * per month.
+ * per month. Each month keeps its own limit (table wallet_budget_limits): the limit of a month is
+ * the one set in that month or the last one before it; months before the first one use the
+ * first one.
  */
 @Component
 public class WalletBudgets {
@@ -65,16 +67,105 @@ public class WalletBudgets {
 		Map<UUID, WalletCategories.Category> categoriesById = this.categories.byIds(userId,
 				rows.stream().map(Row::categoryId).filter(java.util.Objects::nonNull).collect(Collectors.toSet()));
 		return rows.stream().map((row) -> {
-			BigDecimal spent = spent(userId, row, month, settings);
-			int percent = spent.multiply(BigDecimal.valueOf(100)).divide(row.limit(), 0, RoundingMode.FLOOR).intValue();
-			String status = (percent >= 100) ? "EXCEEDED" : (percent >= 80) ? "WARNING" : "OK";
+			BigDecimal spent = spentByMonth(userId, row, month, month, settings, (m) -> row.currency())
+				.getOrDefault(month, BigDecimal.ZERO);
+			int percent = percent(spent, row.limit());
 			WalletCategories.Category category = (row.categoryId() != null) ? categoriesById.get(row.categoryId())
 					: null;
 			CategoryRef ref = (category != null) ? new CategoryRef(category.id(), category.name(), category.icon(),
 					category.archived(), category.parentId(), category.kind()) : null;
 			return new Budget(row.id(), Totals.money(row.limit()), row.currency(), ref, Totals.money(spent), percent,
-					status);
+					status(percent));
 		}).toList();
+	}
+
+	/**
+	 * One budget with its past months (newest first, at most 12, from the first month with an
+	 * expense in its scope) and a summary of the newest up-to-6 of them.
+	 * @throws ApiException 404 {@code budget_not_found}
+	 */
+	@Transactional(readOnly = true)
+	public History history(UUID userId, UUID id) {
+		mine(userId, id);
+		Budget budget = one(userId, id);
+		Row row = rows(userId).stream().filter((r) -> r.id().equals(id)).findFirst().orElseThrow();
+		List<Limit> limits = this.jdbc.query(
+				"SELECT month, amount, currency FROM wallet_budget_limits WHERE budget_id = ? ORDER BY month",
+				(rs, n) -> new Limit(YearMonth.from(rs.getDate("month").toLocalDate()), rs.getBigDecimal("amount"),
+						rs.getString("currency")),
+				id);
+		java.util.function.Function<YearMonth, Limit> limitIn = (m) -> limitOf(limits, m, row);
+		YearMonth last = thisMonth(userId).minusMonths(1);
+		YearMonth first = last.minusMonths(11);
+		Map<YearMonth, BigDecimal> spentByMonth = spentByMonth(userId, row, first, last, this.money.settings(userId),
+				(m) -> limitIn.apply(m).currency());
+		List<BudgetMonth> months = new java.util.ArrayList<>();
+		if (!spentByMonth.isEmpty()) {
+			YearMonth start = java.util.Collections.min(spentByMonth.keySet());
+			for (YearMonth m = last; !m.isBefore(start); m = m.minusMonths(1)) {
+				Limit limit = limitIn.apply(m);
+				BigDecimal spent = spentByMonth.getOrDefault(m, BigDecimal.ZERO);
+				int percent = percent(spent, limit.amount());
+				months.add(new BudgetMonth(m.toString(), Totals.money(spent), Totals.money(limit.amount()),
+						limit.currency(), percent, status(percent)));
+			}
+		}
+		return new History(budget, months, summary(months));
+	}
+
+	/** Over the newest up-to-6 months; null when there are none. */
+	private static Summary summary(List<BudgetMonth> months) {
+		List<BudgetMonth> recent = months.subList(0, Math.min(6, months.size()));
+		if (recent.isEmpty()) {
+			return null;
+		}
+		BigDecimal total = BigDecimal.ZERO;
+		int underLimit = 0;
+		BudgetMonth biggest = recent.get(0);
+		for (BudgetMonth month : recent) {
+			BigDecimal spent = new BigDecimal(month.spent());
+			total = total.add(spent);
+			if (spent.compareTo(new BigDecimal(month.limit())) <= 0) {
+				underLimit++;
+			}
+			if (spent.compareTo(new BigDecimal(biggest.spent())) > 0) {
+				biggest = month;
+			}
+		}
+		BigDecimal average = total.divide(BigDecimal.valueOf(recent.size()), 2, RoundingMode.HALF_UP);
+		return new Summary(recent.size(), Totals.money(average), underLimit,
+				new Biggest(biggest.month(), biggest.spent()));
+	}
+
+	/** The row set in {@code month} or the last one before it; before all rows, the first one. */
+	private static Limit limitOf(List<Limit> limits, YearMonth month, Row row) {
+		if (limits.isEmpty()) {
+			return new Limit(month, row.limit(), row.currency());
+		}
+		Limit found = limits.get(0);
+		for (Limit limit : limits) {
+			if (!limit.month().isAfter(month)) {
+				found = limit;
+			}
+		}
+		return found;
+	}
+
+	/** Whole number (FLOOR), can be over 100. */
+	private static int percent(BigDecimal spent, BigDecimal limit) {
+		return spent.multiply(BigDecimal.valueOf(100)).divide(limit, 0, RoundingMode.FLOOR).intValue();
+	}
+
+	private static String status(int percent) {
+		return (percent >= 100) ? "EXCEEDED" : (percent >= 80) ? "WARNING" : "OK";
+	}
+
+	/** This month's limit = the budget's current amount and currency (earlier months keep theirs). */
+	private void saveLimit(UUID userId, UUID id) {
+		this.jdbc.update("INSERT INTO wallet_budget_limits (budget_id, month, amount, currency) "
+				+ "SELECT id, ?, amount, currency FROM wallet_budgets WHERE id = ? AND user_id = ? "
+				+ "ON CONFLICT (budget_id, month) DO UPDATE SET amount = EXCLUDED.amount, currency = EXCLUDED.currency",
+				Date.valueOf(thisMonth(userId).atDay(1)), id, userId);
 	}
 
 	/**
@@ -97,6 +188,7 @@ public class WalletBudgets {
 		catch (DuplicateKeyException ex) {
 			throw exists();
 		}
+		saveLimit(userId, id);
 		checkAlerts(userId);
 		return one(userId, id);
 	}
@@ -115,6 +207,7 @@ public class WalletBudgets {
 		catch (DuplicateKeyException ex) {
 			throw exists();
 		}
+		saveLimit(userId, id);
 		checkAlerts(userId);
 		return one(userId, id);
 	}
@@ -200,31 +293,37 @@ public class WalletBudgets {
 	}
 
 	/**
-	 * This month's expenses (all currencies) in the budget's currency, not rounded. Transactions
-	 * made by goal movements do not count.
+	 * Expenses per month from {@code from} to {@code to} (all currencies), each month converted into
+	 * {@code currencyOf} that month with my rate, not rounded. Only months with an expense are in the
+	 * map. Category budgets count the category and its subcategories. Transactions made by goal
+	 * movements do not count.
 	 */
-	private BigDecimal spent(UUID userId, Row row, YearMonth month, WalletMoney.Settings settings) {
+	private Map<YearMonth, BigDecimal> spentByMonth(UUID userId, Row row, YearMonth from, YearMonth to,
+			WalletMoney.Settings settings, java.util.function.Function<YearMonth, String> currencyOf) {
 		String categoryFilter = "";
 		Object[] args;
 		if (row.categoryId() != null) {
 			categoryFilter = " AND (category_id = ? OR category_id IN (SELECT id FROM wallet_categories WHERE parent_id = ?))";
-			args = new Object[] { userId, Date.valueOf(month.atDay(1)),
-					Date.valueOf(month.atEndOfMonth()), row.categoryId(), row.categoryId() };
+			args = new Object[] { userId, Date.valueOf(from.atDay(1)),
+					Date.valueOf(to.atEndOfMonth()), row.categoryId(), row.categoryId() };
 		}
 		else {
-			args = new Object[] { userId, Date.valueOf(month.atDay(1)),
-					Date.valueOf(month.atEndOfMonth()) };
+			args = new Object[] { userId, Date.valueOf(from.atDay(1)),
+					Date.valueOf(to.atEndOfMonth()) };
 		}
-		BigDecimal[] spent = { BigDecimal.ZERO };
-		this.jdbc.query("SELECT currency, sum(amount) AS total FROM wallet_transactions "
+		Map<YearMonth, BigDecimal> spent = new java.util.HashMap<>();
+		this.jdbc.query("SELECT date_trunc('month', date::timestamp)::date AS month, currency, sum(amount) AS total "
+				+ "FROM wallet_transactions "
 				+ "WHERE user_id = ? AND type = 'EXPENSE' AND date >= ? AND date <= ?" + categoryFilter
 				// Goal money is saving, not spending.
 				+ " AND NOT EXISTS (SELECT 1 FROM wallet_goal_contributions c WHERE c.transaction_id = wallet_transactions.id)"
-				+ " GROUP BY currency", (rs) -> {
-					spent[0] = spent[0]
-						.add(settings.convert(rs.getBigDecimal("total"), rs.getString("currency"), row.currency()));
+				+ " GROUP BY 1, currency", (rs) -> {
+					YearMonth month = YearMonth.from(rs.getDate("month").toLocalDate());
+					BigDecimal converted = settings.convert(rs.getBigDecimal("total"), rs.getString("currency"),
+							currencyOf.apply(month));
+					spent.merge(month, converted, BigDecimal::add);
 				}, args);
-		return spent[0];
+		return spent;
 	}
 
 	private List<Row> rows(UUID userId) {
@@ -247,6 +346,9 @@ public class WalletBudgets {
 	private record Row(UUID id, BigDecimal limit, String currency, UUID categoryId) {
 	}
 
+	private record Limit(YearMonth month, BigDecimal amount, String currency) {
+	}
+
 	/**
 	 * @param limit in {@code currency}
 	 * @param currency the budget's currency, USD or MAD
@@ -265,6 +367,38 @@ public class WalletBudgets {
 			@io.swagger.v3.oas.annotations.media.Schema(allowableValues = { "USD", "MAD" }, nullable = true,
 					description = "Create: left out = my default wallet currency. Change: left out = keep.")
 			@jakarta.validation.constraints.Pattern(regexp = "USD|MAD", message = "must be USD or MAD") String currency) {
+	}
+
+	/**
+	 * GET /api/wallet/budgets/{id}/history.
+	 * @param budget same as one item of the list (this month)
+	 * @param months past months, newest first, at most 12
+	 * @param summary over the newest up-to-6 months; null when {@code months} is empty
+	 */
+	public record History(Budget budget, List<BudgetMonth> months, Summary summary) {
+	}
+
+	/**
+	 * @param month "2026-10"
+	 * @param spent that month's expenses in scope, converted into {@code currency} (my current rate)
+	 * @param limit the limit that month had, in {@code currency}
+	 * @param percent whole number (FLOOR), can be over 100
+	 * @param status OK (under 80), WARNING (80-99), EXCEEDED (100 or more)
+	 */
+	public record BudgetMonth(String month, String spent, String limit, String currency, int percent,
+			String status) {
+	}
+
+	/**
+	 * @param months how many months it covers (1 to 6)
+	 * @param average mean spent, 2 decimals
+	 * @param underLimit months with spent &lt;= limit
+	 * @param biggest the month with the most spent
+	 */
+	public record Summary(int months, String average, int underLimit, Biggest biggest) {
+	}
+
+	public record Biggest(String month, String spent) {
 	}
 
 }

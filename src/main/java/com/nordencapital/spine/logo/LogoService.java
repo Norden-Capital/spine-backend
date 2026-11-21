@@ -31,7 +31,7 @@ import org.springframework.stereotype.Service;
  * site (servers are often blocked, phones are not), trying the URLs in order and showing
  * the category icon when none works. Per domain: the best icon the site declares in its
  * home page (when our server could read it), then {@code /apple-touch-icon.png}, then
- * {@code /favicon.ico}. The declared icon is looked up in the background, once per domain,
+ * {@code /favicon.ico}, then Google's icon service as a last backup. The declared icon is looked up in the background, once per domain,
  * and kept in the table logos (found: 30 days; page not readable: tried again after 1 day).
  */
 @Service
@@ -68,7 +68,8 @@ public class LogoService implements DisposableBean {
 
 	/** The URLs every domain gets, even when its page cannot be read. */
 	public static List<String> fallbacks(String domain) {
-		return List.of("https://" + domain + "/apple-touch-icon.png", "https://" + domain + "/favicon.ico");
+		return List.of("https://" + domain + "/apple-touch-icon.png", "https://" + domain + "/favicon.ico",
+				"https://www.google.com/s2/favicons?domain=" + domain + "&sz=128");
 	}
 
 	/** Only absolute http/https URLs (never data: or javascript:), at most 2048 characters. */

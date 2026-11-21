@@ -32,7 +32,7 @@ class LiveLogoChecks {
 		System.out.println("LIVE " + domain + " -> " + lookup);
 		assertThat(lookup.iconUrl() == null || LogoService.isWebUrl(lookup.iconUrl())).isTrue();
 		assertThat(LogoService.fallbacks(domain)).containsExactly("https://" + domain + "/apple-touch-icon.png",
-				"https://" + domain + "/favicon.ico");
+				"https://" + domain + "/favicon.ico", "https://www.google.com/s2/favicons?domain=" + domain + "&sz=128");
 	}
 
 }
